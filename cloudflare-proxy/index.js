@@ -425,7 +425,7 @@ async function extractYouTubeBackend(videoId, env) {
   
   // Custom yt-dlp Render backend
   const backendInstances = [
-    env.BACKEND_API_URL
+    env.BACKEND_API_URL ? env.BACKEND_API_URL.trim() : null
   ];
 
   let lastError = null;
@@ -898,8 +898,9 @@ export default {
       // Wake Endpoint (Used to pre-warm Render YT-DLP instance on page load)
       if (url.pathname === '/wake') {
         if (env.BACKEND_API_URL) {
+          const cleanUrl = env.BACKEND_API_URL.trim();
           // Fire-and-forget ping to backend to wake it up
-          ctx.waitUntil(fetch(`${env.BACKEND_API_URL}/wake`, { 
+          ctx.waitUntil(fetch(`${cleanUrl}/wake`, { 
             method: 'GET',
             headers: { "Accept": "application/json" }
           }).catch(() => {}));

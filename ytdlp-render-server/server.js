@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const youtubedl = require('youtube-dl-exec');
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
 
 const app = express();
 app.use(cors());
@@ -11,12 +13,9 @@ app.post('/', async (req, res) => {
   if (!url) return res.status(400).json({ error: "Missing URL" });
 
   try {
-    const output = await youtubedl(url, {
-      dumpJson: true,
-      noWarnings: true,
-      preferFreeFormats: true,
-      extractorArgs: "youtube:player_client=ios,web_creator,tv",
-    });
+    // Run the native yt-dlp binary with aggressive bot-bypass flags
+    const { stdout } = await execPromise(`yt-dlp --dump-json --no-warnings --prefer-free-formats --extractor-args "youtube:player_client=ios,web_creator,tv" "${url}"`);
+    const output = JSON.parse(stdout);
 
     // Mimic the Cobalt API response structure so Cloudflare proxy doesn't need changing
     let videoUrl = null;
