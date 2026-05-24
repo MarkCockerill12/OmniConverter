@@ -9,7 +9,7 @@
 
 ## Features
 - Multi-model 3D Viewer with Model Catalog selection.
-- ZIP archive model discovery and texture resolution.
+- ZIP & SZS (Yaz0/RARC) archive model discovery and texture resolution.
 - Advanced Material/Texture mapping for Wii models (DAE).
 - GLB Master Export (combining all visible models).
 
@@ -19,6 +19,7 @@
 - [2026-05-23] Implemented Multi-Model support with internal catalog discovery.
 - [2026-05-23] Fixed "Cyclops" forehead eye and "Ghost" transparency via surgical DAE node targeting (`polygon0`, `polygon1`).
 - [2026-05-24] Enhanced 3D Loader: Robust '_fix' texture preference for eyes, improved overlay heuristics for mustache/mouth, and resolved missing forehead/transparent eye regressions via surgical alphaTest tuning.
+- [2026-05-24] Added native .szs support: Integrated Yaz0 decompression and RARC archive parsing into the discovery loop.
 - [2026-05-23] Implemented Master GLB Export for combined models.
 
 ## Operational Logic

@@ -61,6 +61,70 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
   const modelsGroupRef = useRef<THREE.Group>(new THREE.Group());
   const loadedModelsMap = useRef<Map<string, THREE.Group>>(new Map());
 
+  // 0. BINARY UTILITIES (SZS / RARC Support)
+  const decompressYaz0 = (data: Uint8Array): Uint8Array => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    if (data.length < 16 || view.getUint32(0) !== 0x59617A30) return data; // Not Yaz0
+
+    const uncompressedSize = view.getUint32(4);
+    const output = new Uint8Array(uncompressedSize);
+    let srcPos = 16, dstPos = 0, codeByte = 0, bitCount = 0;
+
+    while (dstPos < uncompressedSize) {
+      if (bitCount === 0) { codeByte = data[srcPos++]; bitCount = 8; }
+      if (codeByte & 0x80) {
+        output[dstPos++] = data[srcPos++];
+      } else {
+        const b1 = data[srcPos++], b2 = data[srcPos++];
+        const dist = ((b1 & 0x0F) << 8 | b2) + 1;
+        let count = b1 >> 4;
+        if (count === 0) {
+           if (srcPos >= data.length) break;
+           count = data[srcPos++] + 0x12; 
+        } else count += 2;
+        let copySrc = dstPos - dist;
+        for (let i = 0; i < count; i++) {
+           if (dstPos >= uncompressedSize) break;
+           output[dstPos++] = output[copySrc++];
+        }
+      }
+      codeByte = (codeByte << 1) & 0xFF; bitCount--;
+    }
+    return output;
+  };
+
+  const parseRARC = (data: Uint8Array): Record<string, Uint8Array> => {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    if (data.length < 0x20 || view.getUint32(0) !== 0x52415243) return {}; // "RARC"
+
+    const dataHeaderOffset = view.getUint32(8);
+    const fileEntriesOffset = view.getUint32(12) + dataHeaderOffset;
+    const fileEntriesCount = view.getUint32(dataHeaderOffset + 4);
+    const stringTableOffset = view.getUint32(dataHeaderOffset + 8) + dataHeaderOffset;
+    const dataSectionOffset = view.getUint32(0x0C) + dataHeaderOffset;
+
+    const files: Record<string, Uint8Array> = {};
+    const decoder = new TextDecoder();
+
+    for (let i = 0; i < fileEntriesCount; i++) {
+      const entryOffset = fileEntriesOffset + (i * 0x14);
+      const typeFlags = view.getUint16(entryOffset + 4);
+      if (typeFlags & 0x0100) continue; // Directory
+
+      const nameOffset = view.getUint16(entryOffset + 6);
+      const dataOffset = view.getUint32(entryOffset + 8) + dataSectionOffset;
+      const dataSize = view.getUint32(entryOffset + 12);
+
+      let nameEnd = stringTableOffset + nameOffset;
+      while (nameEnd < data.length && data[nameEnd] !== 0) nameEnd++;
+      const name = decoder.decode(data.slice(stringTableOffset + nameOffset, nameEnd));
+
+      if (name === "." || name === "..") continue;
+      files[name] = data.slice(dataOffset, dataOffset + dataSize);
+    }
+    return files;
+  };
+
   const updateGrid = (scene: THREE.Scene, bgColor: string) => {
     const oldGrid = scene.getObjectByName('scene-grid');
     if (oldGrid) scene.remove(oldGrid);
@@ -119,9 +183,21 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
         const imageExts = ['png', 'jpg', 'jpeg', 'webp', 'tga', 'dds', 'bmp'];
 
         for (const file of files) {
-          if (file.name.toLowerCase().endsWith('.zip')) {
+          const isZip = file.name.toLowerCase().endsWith('.zip');
+          const isSzs = file.name.toLowerCase().endsWith('.szs');
+
+          if (isZip || isSzs) {
             const buffer = await file.arrayBuffer();
-            const unzipped = unzipSync(new Uint8Array(buffer));
+            let unzipped: Record<string, Uint8Array> = {};
+            
+            if (isZip) {
+              unzipped = unzipSync(new Uint8Array(buffer));
+            } else {
+              // SZS Support: Yaz0 Decompression -> RARC Parsing
+              const decompressed = decompressYaz0(new Uint8Array(buffer));
+              unzipped = parseRARC(decompressed);
+            }
+
             const zipTextures: Record<string, string> = { ...providedTextures[file.name] };
 
             Object.entries(unzipped).forEach(([path, data]) => {
