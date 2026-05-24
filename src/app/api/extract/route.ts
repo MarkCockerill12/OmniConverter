@@ -12,10 +12,22 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No URL provided" }, { status: 400 });
     }
 
-    // Resolve binary dynamically using process.cwd() to bypass Next.js Webpack __dirname bundling issues
+    // Resolve binary dynamically
     const binName = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
     const binPath = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', binName);
     
+    // Check if binary exists
+    try {
+      const fs = require('fs');
+      if (!fs.existsSync(binPath)) {
+        return NextResponse.json({ 
+          error: "Local yt-dlp binary not found. Since you are using a Raspberry Pi, please ensure NEXT_PUBLIC_SCRAPER_API_URL is set correctly in your .env file to point to the Pi's IP address (e.g., http://192.168.1.100:8080/extract)." 
+        }, { status: 500 });
+      }
+    } catch (fsErr) {
+      console.error("[Local Extractor] FS check failed:", fsErr);
+    }
+
     console.log(`[Local Extractor] Executing yt-dlp for ${url} at ${binPath}`);
 
     // Run yt-dlp to get JSON metadata (-J flag)

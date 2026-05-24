@@ -68,18 +68,22 @@ export default function DownloaderPage() {
     }
   }, [result]);
 
-  // Pre-warm the YT-DLP API backend on page load
+  // Pre-warm the Pi Scraper backend on page load if needed
   useEffect(() => {
-    const proxyUrl = process.env.NEXT_PUBLIC_CLOUDFLARE_PROXY_URL || 'https://omni-convert-proxy.omni-convert-proxy.workers.dev';
-    console.log('[Downloader] 🚀 Waking up Render YT-DLP Instance...');
-    fetch(`${proxyUrl}/wake`, { method: 'GET' })
-      .then(res => {
-        if (res.ok) console.log('[Downloader] ✅ YT-DLP Instance is Awake and Ready!');
-        else console.warn('[Downloader] ⚠️ YT-DLP Instance wake ping returned non-200');
-      })
-      .catch(err => {
-        console.error('[Downloader] ❌ Failed to wake YT-DLP instance:', err);
-      });
+    const proxyUrl = process.env.NEXT_PUBLIC_SCRAPER_API_URL || '/api/extract';
+    console.log('[Downloader] 🚀 Checking Pi Scraper status...');
+    // We can still keep a wake-up call for the Pi Go app if it's on a different port,
+    // but the local Next.js API route (/api/extract) doesn't need "waking up".
+    if (proxyUrl.startsWith('http')) {
+      const wakeUrl = proxyUrl.replace('/extract', '/wake');
+      fetch(wakeUrl, { method: 'GET' })
+        .then(res => {
+          if (res.ok) console.log('[Downloader] ✅ Pi Scraper is Ready!');
+        })
+        .catch(err => {
+          console.warn('[Downloader] ⚠️ Pi Scraper wake ping failed:', err);
+        });
+    }
   }, []);
 
   const handleScrape = async () => {
@@ -102,7 +106,14 @@ export default function DownloaderPage() {
     };
 
     scraperWorker.addEventListener('message', handler);
-    scraperWorker.postMessage({ type: 'SCRAPE', payload: { url } });
+    const scraperApiUrl = process.env.NEXT_PUBLIC_SCRAPER_API_URL || '/api/extract';
+    scraperWorker.postMessage({ 
+      type: 'SCRAPE', 
+      payload: { 
+        url,
+        proxyUrl: scraperApiUrl
+      } 
+    });
   };
 
   const handleDownloadPlaylistVideo = (videoUrl: string) => {
@@ -116,7 +127,9 @@ export default function DownloaderPage() {
   const handleDownload = async (downloadUrl: string, filename: string) => {
     try {
       setDownloadState({ active: true, progress: 0, filename });
-      const proxyUrl = `${process.env.NEXT_PUBLIC_CLOUDFLARE_PROXY_URL}?url=${encodeURIComponent(downloadUrl)}`;
+      
+      // Use local proxy to bypass CORS
+      const proxyUrl = `/api/proxy?url=${encodeURIComponent(downloadUrl)}`;
       const res = await fetch(proxyUrl);
       const total = parseInt(res.headers.get('content-length') || '0', 10);
       const reader = res.body!.getReader();
@@ -129,7 +142,7 @@ export default function DownloaderPage() {
         received += value.length;
         if (total) setDownloadState(s => ({ ...s, progress: Math.round((received / total) * 100) }));
       }
-      const blob = new Blob(chunks);
+      const blob = new Blob(chunks as any);
       const objUrl = URL.createObjectURL(blob);
       const a = document.createElement('a'); 
       a.href = objUrl; 

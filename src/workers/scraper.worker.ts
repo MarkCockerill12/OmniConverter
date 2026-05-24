@@ -30,19 +30,33 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   if (type === 'SCRAPE') {
-    if (!globalProxyUrl) {
-      self.postMessage({ type: 'SCRAPE_ERROR', error: 'Scraper worker not initialized' });
-      return;
+    const targetUrl = payload.url;
+    let proxyUrl = payload.proxyUrl || globalProxyUrl;
+
+    // Fallback: If no proxy is provided, use the local API route
+    if (!proxyUrl) {
+      // In a worker, we can use self.location.origin to point back to the Next.js server
+      proxyUrl = self.location.origin + '/api';
+      console.log('[Worker] No Proxy provided, defaulting to local API:', proxyUrl);
     }
 
     try {
-      const targetUrl = payload.url;
+      if (proxyUrl && proxyUrl.includes('<YOUR_PI_IP>')) {
+        throw new Error('Please update NEXT_PUBLIC_SCRAPER_API_URL in your .env file with your Raspberry Pi\'s actual IP address.');
+      }
+
       console.log('[Worker] Extracting via server:', targetUrl);
 
-      // Build the extract endpoint URL from the proxy base
-      const proxyExtractUrl = new URL('/extract', globalProxyUrl).toString();
+      // Build the extract endpoint URL. 
+      // If proxyUrl doesn't end with /extract, add it.
+      let proxyExtractUrl: string;
+      if (proxyUrl.endsWith('/extract')) {
+        proxyExtractUrl = proxyUrl;
+      } else {
+        proxyExtractUrl = new URL('/api/extract', proxyUrl.startsWith('http') ? proxyUrl : self.location.origin).toString();
+      }
       
-      console.log('[Worker] Routing through Cloudflare Proxy...');
+      console.log(`[Worker] Routing through: ${proxyExtractUrl}`);
       const response = await fetch(proxyExtractUrl, {
         method: 'POST',
         headers: {
@@ -71,6 +85,54 @@ self.onmessage = async (e: MessageEvent) => {
         throw new Error(result.error);
       }
 
+      // Filter and clean formats to show only useful resolutions
+      const filteredFormats = (result.formats || [])
+        .filter((f: any) => {
+          // 1. Remove storyboards (mhtml/images)
+          if (f.format_note?.toLowerCase().includes('storyboard')) return false;
+          if (f.ext === 'mhtml' || f.ext === 'jpg' || f.ext === 'png') return false;
+          
+          // 2. Remove very low quality duplicates unless they are the only ones
+          if (f.height && f.height < 144) return false;
+          
+          // 3. Remove "ultranow" or weird protocol fragments
+          if (f.url && (f.url.includes('fragment') || f.url.includes('manifest'))) {
+            // Keep if it's the only source, but usually these are redundant
+          }
+          
+          return true;
+        })
+        .map((f: any) => ({
+          url: f.url,
+          ext: f.ext || 'mp4',
+          format_note: f.format_note || f.quality || 'Download',
+          resolution: f.resolution || (f.height ? `${f.height}p` : 'Unknown'),
+          filesize: f.filesize || null,
+          hasVideo: f.hasVideo,
+          hasAudio: f.hasAudio,
+          height: f.height || 0
+        }));
+
+      // Group by resolution to remove duplicates
+      const uniqueFormats: any[] = [];
+      const seenResolutions = new Set();
+      
+      // Sort: combined (video+audio) first, then by resolution descending
+      filteredFormats.sort((a: any, b: any) => {
+        const aComb = (a.hasVideo && a.hasAudio) ? 1 : 0;
+        const bComb = (b.hasVideo && b.hasAudio) ? 1 : 0;
+        if (bComb !== aComb) return bComb - aComb;
+        return b.height - a.height;
+      });
+
+      filteredFormats.forEach((f: any) => {
+        const key = `${f.resolution}-${f.ext}-${f.hasVideo}-${f.hasAudio}`;
+        if (!seenResolutions.has(key)) {
+          uniqueFormats.push(f);
+          seenResolutions.add(key);
+        }
+      });
+
       // Ensure we have a valid result structure
       let cleanResult: any;
       if (result.isPlaylist) {
@@ -86,18 +148,10 @@ self.onmessage = async (e: MessageEvent) => {
           title: result.title || 'Unknown Title',
           thumbnail: result.thumbnail || null,
           duration: result.duration || 'Unknown',
-          url: result.url || (result.formats?.[0]?.url || null),
+          url: result.url || (uniqueFormats?.[0]?.url || null),
           platform: result.platform || 'generic',
           isAudioOnly: !!result.isAudioOnly,
-          formats: (result.formats || []).map((f: any) => ({
-            url: f.url,
-            ext: f.ext || 'mp4',
-            format_note: f.format_note || f.quality || 'Download',
-            resolution: f.resolution || 'Unknown',
-            filesize: f.filesize || null,
-            hasVideo: f.hasVideo,
-            hasAudio: f.hasAudio,
-          })),
+          formats: uniqueFormats.slice(0, 8), // Cap at 8 main formats
         };
       }
 

@@ -5,11 +5,16 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { ColladaLoader } from "three/examples/jsm/loaders/ColladaLoader.js";
+import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { Box, Loader2, AlertCircle } from "lucide-react";
+import { Box, Loader2, AlertCircle, RefreshCw, Layers, Check, X, Eye, EyeOff } from "lucide-react";
+import { unzipSync } from "fflate";
+import { cn } from "@/lib/utils";
 
 interface ThreeDViewerProps {
-  file: File;
+  files: File[];
+  textures?: Record<string, Record<string, string>>; // filename -> (subfilename -> blob url)
   onNodesLoaded?: (nodes: SceneNode[]) => void;
   hiddenNodes?: string[];
   backgroundColor?: string;
@@ -19,248 +24,462 @@ export interface SceneNode {
   id: string;
   name: string;
   type: string;
+  count?: number; 
   children: SceneNode[];
 }
 
+interface InternalModel {
+  id: string;
+  name: string;
+  file: File;
+  textures: Record<string, string>;
+  sourceName: string;
+  visible: boolean;
+}
+
 export interface ThreeDViewerHandle {
-  exportGLB: () => Promise<void>;
+  exportGLB: (format?: string, customName?: string) => Promise<void>;
 }
 
 const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({ 
-  file, 
+  files, 
+  textures: providedTextures = {},
   onNodesLoaded, 
   hiddenNodes = [],
   backgroundColor = "#d1d5db"
 }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [discoveredModels, setDiscoveredModels] = useState<InternalModel[]>([]);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   
   const sceneRef = useRef<THREE.Scene | null>(null);
-  const pivotRef = useRef<THREE.Group | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const modelsGroupRef = useRef<THREE.Group>(new THREE.Group());
+  const loadedModelsMap = useRef<Map<string, THREE.Group>>(new Map());
 
   const updateGrid = (scene: THREE.Scene, bgColor: string) => {
     const oldGrid = scene.getObjectByName('scene-grid');
     if (oldGrid) scene.remove(oldGrid);
-
     const color = new THREE.Color(bgColor);
     const isDark = (color.r * 0.299 + color.g * 0.587 + color.b * 0.114) < 0.5;
     const gridColor = isDark ? 0xffffff : 0x000000;
-    const grid = new THREE.GridHelper(50, 50, gridColor, gridColor);
+    const grid = new THREE.GridHelper(100, 100, gridColor, gridColor);
     grid.name = 'scene-grid';
     grid.material.transparent = true;
-    grid.material.opacity = isDark ? 0.1 : 0.2;
+    grid.material.opacity = isDark ? 0.05 : 0.1;
     scene.add(grid);
   };
 
-  useEffect(() => {
-    if (sceneRef.current) {
-      sceneRef.current.background = new THREE.Color(backgroundColor);
-      updateGrid(sceneRef.current, backgroundColor);
-    }
-  }, [backgroundColor]);
-
   useImperativeHandle(ref, () => ({
-    exportGLB: async () => {
-      if (!pivotRef.current) return;
-      const exporter = new GLTFExporter();
-      exporter.parse(
-        pivotRef.current,
-        (result) => {
-          const blob = new Blob([result as any], { type: 'model/gltf-binary' });
+    exportGLB: async (format = 'glb', customName?: string) => {
+      if (!modelsGroupRef.current) throw new Error("Model not ready.");
+      return new Promise((resolve, reject) => {
+        const exporter = new GLTFExporter();
+        exporter.parse(modelsGroupRef.current, (result) => {
+          const isBinary = format.toLowerCase() === 'glb';
+          const blob = new Blob([isBinary ? result as any : JSON.stringify(result)], { 
+            type: isBinary ? 'model/gltf-binary' : 'application/json' 
+          });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = `modified_${file.name.split('.')[0]}.glb`;
+          a.download = customName || `Omni_Export_${Date.now()}.${format}`;
+          document.body.appendChild(a);
           a.click();
+          document.body.removeChild(a);
           URL.revokeObjectURL(url);
-        },
-        (error) => console.error('Export error:', error),
-        { binary: true }
-      );
+          resolve();
+        }, (err) => reject(err), { binary: format.toLowerCase() === 'glb', includeCustomExtensions: true });
+      });
     }
   }));
 
-  useEffect(() => {
-    if (!pivotRef.current) return;
-    pivotRef.current.traverse((child) => {
-      if (hiddenNodes.includes(child.uuid) || hiddenNodes.includes(child.name)) {
-        child.visible = false;
-      } else {
-        child.visible = true;
-      }
+  const applyVisibility = () => {
+    modelsGroupRef.current.traverse((child) => {
+      const shouldHide = hiddenNodes.includes(child.uuid) || hiddenNodes.includes(child.name);
+      child.visible = !shouldHide;
     });
-  }, [hiddenNodes]);
+  };
 
+  useEffect(() => { applyVisibility(); }, [hiddenNodes]);
+
+  // 1. DISCOVERY EFFECT: Scans ZIPs and files for models
   useEffect(() => {
-    if (!containerRef.current || !file) return;
-
-    setLoading(true);
-    setError(null);
-
-    const container = containerRef.current;
+    if (!files || files.length === 0) return;
     
-    // 1. Scene Setup
+    const discover = async () => {
+      try {
+        setLoading(true);
+        const allDiscovered: InternalModel[] = [];
+        const modelExts = ['dae', 'glb', 'gltf', 'obj', 'stl'];
+        const imageExts = ['png', 'jpg', 'jpeg', 'webp', 'tga', 'dds', 'bmp'];
+
+        for (const file of files) {
+          if (file.name.toLowerCase().endsWith('.zip')) {
+            const buffer = await file.arrayBuffer();
+            const unzipped = unzipSync(new Uint8Array(buffer));
+            const zipTextures: Record<string, string> = { ...providedTextures[file.name] };
+
+            Object.entries(unzipped).forEach(([path, data]) => {
+              if (data.length === 0) return;
+              const normalized = path.replace(/\\/g, '/');
+              const filename = normalized.split('/').pop() || normalized;
+              const ext = filename.split('.').pop()?.toLowerCase() || '';
+              if (imageExts.includes(ext)) {
+                const url = URL.createObjectURL(new Blob([data as any], { type: `image/${ext === 'jpg' ? 'jpeg' : ext}` }));
+                zipTextures[normalized] = url;
+                zipTextures[filename] = url;
+                zipTextures[path] = url;
+                zipTextures[filename.replace(/\.[^/.]+$/, "")] = url;
+              }
+            });
+
+            Object.entries(unzipped).forEach(([path, data]) => {
+              if (data.length === 0) return;
+              const ext = path.split('.').pop()?.toLowerCase() || '';
+              if (modelExts.includes(ext)) {
+                let finalData: any = data;
+                if (ext === 'dae') {
+                  try {
+                    const decoder = new TextDecoder();
+                    let content = decoder.decode(data);
+                    
+                    // TARGETED REPLACEMENT: Fix COLLADA 1.5.0 <ref> tag (Robust Version)
+                    content = content.replace(/<init_from>\s*<ref>([\s\S]*?)<\/ref>\s*<\/init_from>/g, '<init_from>$1</init_from>');
+                    
+                    finalData = new TextEncoder().encode(content);
+                  } catch (e) {
+                    console.warn("[Viewer] DAE Pre-process failed:", e);
+                  }
+                }
+                const modelFile = new File([new Blob([finalData as any])], path.replace(/\\/g, '/'));
+                allDiscovered.push({
+                  id: Math.random().toString(36).substring(2, 9),
+                  name: path.split('/').pop() || path,
+                  file: modelFile,
+                  textures: zipTextures,
+                  sourceName: file.name,
+                  visible: allDiscovered.length === 0
+                });
+              }
+            });
+          } else {
+            const ext = file.name.split('.').pop()?.toLowerCase() || '';
+            if (modelExts.includes(ext)) {
+              allDiscovered.push({
+                id: Math.random().toString(36).substring(2, 9),
+                name: file.name,
+                file: file,
+                textures: providedTextures[file.name] || {},
+                sourceName: file.name,
+                visible: allDiscovered.length === 0
+              });
+            }
+          }
+        }
+
+        if (allDiscovered.length === 0) {
+          setError("No 3D models found.");
+          setLoading(false);
+        } else {
+          setDiscoveredModels(allDiscovered);
+          setError(null);
+        }
+      } catch (e) {
+        console.error("[Viewer] Discovery failed:", e);
+        setError("Archive Error");
+        setLoading(false);
+      }
+    };
+    discover();
+  }, [files]);
+
+  // 2. MAIN ENGINE EFFECT
+  useEffect(() => {
+    if (!containerRef.current || discoveredModels.length === 0) return;
+    
+    const container = containerRef.current;
     const scene = new THREE.Scene();
     sceneRef.current = scene;
     scene.background = new THREE.Color(backgroundColor);
     updateGrid(scene, backgroundColor);
-
-    // 2. Camera Setup
-    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 2000);
-    camera.position.set(10, 10, 10);
+    
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth/container.clientHeight, 0.1, 50000);
+    camera.position.set(25,25,25);
     cameraRef.current = camera;
 
-    // 3. Renderer Setup - High Stability
-    const renderer = new THREE.WebGLRenderer({ 
-      antialias: true, 
-      alpha: true,
-      powerPreference: "high-performance",
-      preserveDrawingBuffer: false // Prevent extra memory copy
-    });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     rendererRef.current = renderer;
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(window.devicePixelRatio);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    
-    // CSS Force-Fill prevents the "black box" flickering
-    renderer.domElement.style.width = '100%';
-    renderer.domElement.style.height = '100%';
-    renderer.domElement.style.display = 'block';
-    
     container.appendChild(renderer.domElement);
 
-    // 4. Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
-    scene.add(ambientLight);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
-    directionalLight.position.set(5, 10, 7);
-    scene.add(directionalLight);
+    scene.add(new THREE.AmbientLight(0xffffff, 2.0));
+    const dl = new THREE.DirectionalLight(0xffffff, 2.0);
+    dl.position.set(10, 50, 10);
+    scene.add(dl);
 
-    // 5. Controls
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.1;
     controlsRef.current = controls;
 
-    // 6. Loader
-    const fileUrl = URL.createObjectURL(file);
-    const extension = file.name.split('.').pop()?.toLowerCase();
+    scene.add(modelsGroupRef.current);
 
-    const extractNodeTree = (obj: THREE.Object3D): SceneNode => ({
-      id: obj.uuid,
-      name: obj.name || obj.type,
-      type: obj.type,
-      children: obj.children.map(extractNodeTree)
+    let anim: number;
+    const loop = () => { anim = requestAnimationFrame(loop); if (controlsRef.current) controlsRef.current.update(); if (rendererRef.current && sceneRef.current && cameraRef.current) rendererRef.current.render(sceneRef.current, cameraRef.current); };
+    loop();
+
+    const ro = new ResizeObserver((es) => {
+      if (!es.length || !rendererRef.current || !cameraRef.current || !containerRef.current) return;
+      const { width: w, height: h } = es[0].contentRect;
+      camera.aspect = w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h,false);
     });
-
-    const onLoad = (object: THREE.Object3D | any) => {
-      const model = object.scene || object;
-      if (onNodesLoaded) onNodesLoaded([extractNodeTree(model)]);
-
-      model.traverse((child: any) => {
-        if (child.isMesh) {
-          child.material.side = THREE.DoubleSide;
-          child.castShadow = true;
-        }
-      });
-
-      const box = new THREE.Box3().setFromObject(model);
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-      const size = new THREE.Vector3();
-      box.getSize(size);
-
-      model.position.set(-center.x, -center.y, -center.z);
-      const pivot = new THREE.Group();
-      pivotRef.current = pivot;
-      pivot.add(model);
-      scene.add(pivot);
-      
-      const maxDim = Math.max(size.x, size.y, size.z);
-      if (maxDim > 0) {
-        const scale = 5 / maxDim;
-        pivot.scale.set(scale, scale, scale);
-      }
-
-      camera.position.set(10, 10, 10);
-      camera.lookAt(0, 0, 0);
-      controls.target.set(0, 0, 0);
-      controls.update();
-      setLoading(false);
-      URL.revokeObjectURL(fileUrl);
-    };
-
-    if (extension === 'glb' || extension === 'gltf') {
-      new GLTFLoader().load(fileUrl, onLoad, undefined, () => setError("Failed to load model."));
-    } else if (extension === 'obj') {
-      new OBJLoader().load(fileUrl, onLoad, undefined, () => setError("Failed to load model."));
-    } else {
-      setError(`Format .${extension} not supported.`);
-      setLoading(false);
-    }
-
-    // 7. Animation Loop
-    let animationId: number;
-    const animate = () => {
-      animationId = requestAnimationFrame(animate);
-      if (controlsRef.current) controlsRef.current.update();
-      if (rendererRef.current && sceneRef.current && cameraRef.current) {
-        rendererRef.current.render(sceneRef.current, cameraRef.current);
-      }
-    };
-    animate();
-
-    // 8. Robust Resize (Sync to Animation Frame)
-    const resizeObserver = new ResizeObserver((entries) => {
-      if (!entries.length || !rendererRef.current || !cameraRef.current) return;
-      const { width: w, height: h } = entries[0].contentRect;
-      if (w === 0 || h === 0) return;
-
-      requestAnimationFrame(() => {
-        if (!cameraRef.current || !rendererRef.current) return;
-        cameraRef.current.aspect = w / h;
-        cameraRef.current.updateProjectionMatrix();
-        // IMPORTANT: setSize(w, h, false) prevents CSS re-injection, stopping the flicker
-        rendererRef.current.setSize(w, h, false);
-      });
-    });
-    resizeObserver.observe(container);
+    ro.observe(container);
 
     return () => {
-      resizeObserver.disconnect();
-      cancelAnimationFrame(animationId);
+      ro.disconnect();
+      cancelAnimationFrame(anim);
       if (rendererRef.current) {
-        rendererRef.current.dispose();
-        if (container.contains(rendererRef.current.domElement)) {
-          container.removeChild(rendererRef.current.domElement);
-        }
+         rendererRef.current.dispose();
+         if (container.contains(rendererRef.current.domElement)) container.removeChild(rendererRef.current.domElement);
       }
-      scene.clear();
-      pivotRef.current = null;
-      sceneRef.current = null;
-      rendererRef.current = null;
-      cameraRef.current = null;
-      controlsRef.current = null;
     };
-  }, [file]);
+  }, [backgroundColor, discoveredModels.length]);
+
+  // 3. MODEL SYNCHRONIZER
+  useEffect(() => {
+    if (!sceneRef.current) return;
+    
+    const visibleModels = discoveredModels.filter(m => m.visible);
+    
+    loadedModelsMap.current.forEach((group, id) => {
+      if (!visibleModels.find(m => m.id === id)) {
+        modelsGroupRef.current.remove(group);
+      }
+    });
+
+    visibleModels.forEach(modelInfo => {
+      if (loadedModelsMap.current.has(modelInfo.id)) {
+        modelsGroupRef.current.add(loadedModelsMap.current.get(modelInfo.id)!);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      const manager = new THREE.LoadingManager();
+      const textureLoader = new THREE.TextureLoader(manager);
+      const activeTextures = modelInfo.textures;
+
+      manager.setURLModifier((url) => {
+        if (url.startsWith('data:')) return url;
+        let searchUrl = url;
+        if (url.startsWith('blob:')) {
+           if (/\.(png|jpg|jpeg|webp|tga|dds|bmp)$/i.test(url)) {
+              searchUrl = url.split('/').pop()?.split('?')[0] || url;
+           } else return url;
+        }
+        const fileName = searchUrl.split('/').pop()?.split('?')[0] || '';
+        const baseName = fileName.replace(/\.[^/.]+$/, "");
+        const decodedFileName = decodeURIComponent(fileName);
+        const decodedBaseName = decodeURIComponent(baseName);
+        let normalized = searchUrl.replace(/\\/g, '/').replace(/^\.\//, '');
+        
+        // SURGICAL: Prefer _fix textures for eyes to resolve Cyclops issue
+        if (fileName.toLowerCase().includes('eye') || decodedFileName.toLowerCase().includes('eye')) {
+           const fixBase = baseName + "_fix";
+           const dFixBase = decodedBaseName + "_fix";
+           const fixMatch = Object.keys(activeTextures).find(k => {
+              const kFile = k.split('/').pop()?.replace(/\.[^/.]+$/, "").toLowerCase() || "";
+              return kFile === fixBase.toLowerCase() || kFile === dFixBase.toLowerCase();
+           });
+           if (fixMatch) return activeTextures[fixMatch];
+        }
+
+        if (activeTextures[normalized]) return activeTextures[normalized];
+        if (activeTextures[decodeURIComponent(normalized)]) return activeTextures[decodeURIComponent(normalized)];
+        if (activeTextures[fileName]) return activeTextures[fileName];
+        if (activeTextures[decodedFileName]) return activeTextures[decodedFileName];
+        if (activeTextures[baseName]) return activeTextures[baseName];
+        if (activeTextures[decodedBaseName]) return activeTextures[decodedBaseName];
+        if (modelInfo.file.name.includes('/')) {
+          const modelDir = modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/'));
+          const fullRel = `${modelDir}/${normalized}`;
+          if (activeTextures[fullRel]) return activeTextures[fullRel];
+          const fileRel = `${modelDir}/${fileName}`;
+          if (activeTextures[fileRel]) return activeTextures[fileRel];
+        }
+        const anyMatch = Object.keys(activeTextures).find(k => k.endsWith('/' + fileName) || k === fileName || k.endsWith('/' + decodedFileName) || k === decodedFileName);
+        if (anyMatch) return activeTextures[anyMatch];
+        return url;
+      });
+
+      const onLoad = (object: any) => {
+        const model = object.scene || object;
+        const applyMaterialFixes = () => {
+          model.traverse((child: any) => {
+            if (child.isMesh) {
+              const mats = Array.isArray(child.material) ? child.material : [child.material];
+              mats.forEach((mat: any) => {
+                 if (!mat) return;
+                 const matName = String(mat.name || "").toLowerCase();
+                 const meshName = String(child.name || "").toLowerCase();
+                 const sortedKeys = Object.keys(activeTextures).sort((a, b) => b.length - a.length);
+
+                 // 1. UNIVERSAL WEIGHTED MATCHER (Surgical)
+                 if (!mat.map) {
+                    let bestKey = "";
+                    let bestScore = -1;
+                    const tags = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth", "face", "mouth", "tire", "wheel", "all", "body"];
+
+                    for (const key of sortedKeys) {
+                       const texName = key.toLowerCase().split('/').pop()?.replace(/\.[^/.]+$/, "") || "";
+                       let score = 0;
+
+                       if (texName === matName) score += 1000;
+                       if (matName.includes(texName)) score += 500;
+                       if (texName.includes(matName)) score += 400;
+
+                       for (const tag of tags) {
+                          const hasMatTag = matName.includes(tag) || meshName.includes(tag);
+                          const hasTexTag = texName.includes(tag);
+                          if (hasMatTag && hasTexTag) score += 300;
+                          if (!hasMatTag && hasTexTag) score -= 800; // Strong penalty for specialized textures (like eyes)
+                       }
+
+                       if (score > bestScore) {
+                          bestScore = score;
+                          bestKey = key;
+                       }
+                    }
+
+                    if (bestKey && bestScore > 0) {
+                       mat.map = textureLoader.load(activeTextures[bestKey]);
+                    }
+                 }
+
+                 // 2. UNIVERSAL MATERIAL HEURISTICS
+                 if (mat.map) {
+                    mat.color.set(0xffffff);
+                    mat.opacity = 1.0;
+                    if (mat.emissive) mat.emissive.set(0x000000);
+                    if (mat.specular) mat.specular.set(0x000000);
+                    
+                    const lowerMat = matName.toLowerCase();
+                    const lowerMesh = meshName.toLowerCase();
+                    
+                    // Generic Semantic Layers + Surgical Targeting (polygon0/polygon1)
+                    const isEye = lowerMesh === "polygon1" || lowerMat.includes("eye") || lowerMesh.includes("eye");
+                    const isMouth = lowerMat.includes("mouth") || lowerMesh.includes("mouth") || lowerMat.includes("lm_");
+                    const isMustache = lowerMat.includes("mustache") || lowerMesh.includes("mustache");
+                    const isOverlay = isEye || isMouth || isMustache || lowerMat.includes("alpha") || lowerMat.includes("overlay");
+
+                    if (isOverlay) {
+                       mat.transparent = true;
+                       mat.vertexColors = false; 
+                       mat.alphaTest = 0.05; // Low threshold to prevent discarding partially transparent features
+                       mat.polygonOffset = true;
+                       mat.polygonOffsetFactor = -1;
+                       mat.polygonOffsetUnits = -4;
+                       // Stack: Body(0) -> Mouth(5) -> Overlay(10) -> Eyes(15)
+                       child.renderOrder = isEye ? 15 : (isMouth ? 5 : 10);
+                    } else {
+                       mat.transparent = false; // SOLID BODY (polygon0)
+                       mat.vertexColors = false; 
+                       mat.alphaTest = 0; // No discarding for body
+                       child.renderOrder = 0;
+                    }
+
+                    mat.side = THREE.DoubleSide;
+                    mat.depthWrite = true;
+                    mat.depthTest = true;
+                    // SURGICAL: MirroredRepeatWrapping helps with eye mirroring issues if UVs are set up for it
+                    mat.map.wrapS = mat.map.wrapT = isEye ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
+                    mat.map.flipY = true;
+                    mat.map.colorSpace = THREE.SRGBColorSpace;
+                    mat.map.minFilter = mat.map.magFilter = THREE.LinearFilter;
+                    mat.map.needsUpdate = true;
+                    mat.needsUpdate = true;
+                 }
+              });
+            }
+          });
+        };
+        applyMaterialFixes();
+        
+        const pivot = new THREE.Group();
+        pivot.add(model);
+        
+        const box = new THREE.Box3().setFromObject(model);
+        const center = new THREE.Vector3(); box.getCenter(center);
+        const size = new THREE.Vector3(); box.getSize(size);
+        model.position.set(-center.x, -center.y, -center.z);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) pivot.scale.setScalar(12 / maxDim);
+        
+        loadedModelsMap.current.set(modelInfo.id, pivot);
+        modelsGroupRef.current.add(pivot);
+        applyVisibility();
+        setTimeout(applyMaterialFixes, 300);
+        updateNodeTree();
+        setLoading(false);
+      };
+
+      const url = URL.createObjectURL(modelInfo.file);
+      const ext = modelInfo.file.name.split('.').pop()?.toLowerCase();
+      if (ext === 'dae') {
+         const loader = new ColladaLoader(manager);
+         if (modelInfo.file.name.includes('/')) loader.setResourcePath(modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/') + 1));
+         loader.load(url, (c) => c ? onLoad(c.scene) : null, undefined, () => setLoading(false));
+      } else if (ext === 'glb' || ext === 'gltf') new GLTFLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
+      else if (ext === 'obj') new OBJLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
+      else if (ext === 'stl') new STLLoader(manager).load(url, (g) => onLoad(new THREE.Mesh(g, new THREE.MeshPhongMaterial())), undefined, () => setLoading(false));
+      else setLoading(false);
+    });
+  }, [discoveredModels]);
+
+  const updateNodeTree = () => {
+    if (!onNodesLoaded) return;
+    let totalCount = 0;
+    const extract = (obj: THREE.Object3D): SceneNode => {
+      totalCount++;
+      return { id: obj.uuid, name: obj.name || obj.type, type: obj.type, children: obj.children.map(extract) };
+    };
+    const rootNodes = Array.from(loadedModelsMap.current.values()).map(group => extract(group.children[0]));
+    const virtualRoot: SceneNode = { id: 'root', name: 'Scene', type: 'Scene', count: totalCount, children: rootNodes };
+    onNodesLoaded([virtualRoot]);
+  };
+
+  const toggleModelVisibility = (id: string) => {
+    setDiscoveredModels(prev => prev.map(m => m.id === id ? { ...m, visible: !m.visible } : m));
+  };
 
   return (
     <div ref={containerRef} className="w-full h-full relative outline-none bg-transparent overflow-hidden">
-      {loading && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0f1115]/40 backdrop-blur-sm z-10">
-          <Loader2 className="w-12 h-12 text-[#e11d48] animate-spin mb-4" />
-          <p className="text-neutral-400 font-bold tracking-widest uppercase text-[10px]">Synchronizing Workspace...</p>
-        </div>
-      )}
-      {error && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-md z-10 p-6 text-center">
-          <AlertCircle className="w-12 h-12 text-[#e11d48] mb-4" />
-          <p className="text-white font-black tracking-tight mb-2 text-lg">{error}</p>
+      {loading && <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#0f1115]/95 backdrop-blur-md z-10"><Loader2 className="w-16 h-12 text-[#e11d48] animate-spin mb-4" /><p className="text-neutral-400 font-black uppercase text-[10px] tracking-[0.2em] animate-pulse">Initializing Multiverse...</p></div>}
+      {error && <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 backdrop-blur-md z-10 p-6 text-center border-t border-[#e11d48]/10"><AlertCircle className="w-16 h-12 text-[#e11d48] mb-4 animate-pulse" /><p className="text-white font-black tracking-tight text-xl italic mb-6">{error}</p><button onClick={() => window.location.reload()} className="px-8 py-3 bg-white/5 hover:bg-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">Retry Engine</button></div>}
+
+      {!loading && discoveredModels.length > 0 && (
+        <div className="absolute top-4 right-4 z-50 flex flex-col items-end gap-2">
+           <button onClick={() => setIsMenuOpen(!isMenuOpen)} className={cn("p-3 rounded-xl backdrop-blur-xl border transition-all shadow-2xl flex items-center gap-3", isMenuOpen ? "bg-[#e11d48] border-[#e11d48] text-white" : "bg-[#1f2228]/95 border-white/10 text-neutral-400 hover:text-white")}><Layers className="w-4 h-4" /><span className="text-[10px] font-black uppercase tracking-widest pr-1">Models ({discoveredModels.filter(m => m.visible).length}/{discoveredModels.length})</span></button>
+           {isMenuOpen && (
+             <div className="w-64 bg-[#1f2228]/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
+                <div className="p-3 border-b border-white/5 bg-white/5 flex items-center justify-between"><p className="text-[10px] font-black uppercase tracking-widest text-neutral-400">Mesh Catalog</p><button onClick={() => setIsMenuOpen(false)} className="text-neutral-500 hover:text-white"><X className="w-4 h-4" /></button></div>
+                <div className="max-h-[300px] overflow-y-auto custom-scrollbar">
+                   {discoveredModels.map((model) => (
+                     <button key={model.id} onClick={() => toggleModelVisibility(model.id)} className="w-full flex items-center gap-3 p-3 hover:bg-white/5 transition-colors border-b border-white/5 last:border-0 text-left">
+                        <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-all", model.visible ? "bg-emerald-500 border-emerald-500 text-white" : "border-white/20 text-transparent")}><Check className="w-3 h-3 stroke-[4px]" /></div>
+                        <div className="flex-1 min-w-0"><p className={cn("text-xs font-bold truncate", model.visible ? "text-white" : "text-neutral-500")}>{model.name}</p><p className="text-[8px] font-black uppercase tracking-tighter text-neutral-600 truncate">{model.sourceName}</p></div>
+                        {model.visible ? <Eye className="w-3.5 h-3.5 text-emerald-500" /> : <EyeOff className="w-3.5 h-3.5 text-neutral-600" />}
+                     </button>
+                   ))}
+                </div>
+             </div>
+           )}
         </div>
       )}
     </div>

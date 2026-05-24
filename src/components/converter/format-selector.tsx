@@ -23,7 +23,7 @@ const ALLOWED_CONVERSIONS: Record<Category, Category[]> = {
   "Audio": ["Audio"],
   "3D Model": ["3D Model"],
   "Document": ["Document"],
-  "Archive": ["Archive"]
+  "Archive": ["Archive", "3D Model"] // Enable ZIP to 3D Model conversion
 };
 
 export function getFileCategory(fileName: string): Category {

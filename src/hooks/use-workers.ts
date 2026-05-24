@@ -31,7 +31,6 @@ export function useWorkers() {
         console.error('[Media Worker] Init Failed:', e.data.error);
       }
     };
-    mediaWorker.current.postMessage({ type: 'INIT' });
 
     // Initialize Scraper Worker
     scraperWorker.current = new Worker(
@@ -39,17 +38,9 @@ export function useWorkers() {
     );
     scraperWorker.current.onmessage = (e) => {
       if (e.data.type === 'INIT_SUCCESS') setScraperReady(true);
+      if (e.data.type === 'LOG') console.log('[Scraper Worker]', e.data.message);
+      if (e.data.type === 'SCRAPE_SUCCESS') setScraperReady(true); // Auto-ready on first success
     };
-    
-    const proxyUrl = process.env.NEXT_PUBLIC_CLOUDFLARE_PROXY_URL;
-    console.log(`[Main] Initializing Scraper Worker with Proxy: ${proxyUrl || 'MISSING'}`);
-    
-    scraperWorker.current.postMessage({ 
-      type: 'INIT', 
-      payload: { 
-        proxyUrl: proxyUrl 
-      } 
-    });
 
     // Initialize Binary Worker
     binaryWorker.current = new Worker(

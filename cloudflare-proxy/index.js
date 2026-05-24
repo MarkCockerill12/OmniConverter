@@ -492,14 +492,82 @@ async function extractYouTubeBackend(videoId, env) {
     }
   } // end of for loop
 
-  // If ALL instances in the pool fail, fallback to Innertube
-  console.error("[Extract] Entire Backend Pool failed, falling back to innertube:", lastError?.message);
-  const fallbackResult = await extractYouTube(videoId);
+  // If ALL instances in the pool fail, fallback to Piped API
+  console.error("[Extract] Entire Backend Pool failed, falling back to Piped API:", lastError?.message);
+  const fallbackResult = await extractYouTubePiped(videoId);
   if (fallbackResult.error) {
     fallbackResult.error = `Backend Pool Error: ${lastError?.message} | Fallback Error: ${fallbackResult.error}`;
     fallbackResult.source = 'backend-pool-failed';
   }
   return fallbackResult;
+}
+
+// ─── Piped API Fallback ─────────────────────────────────────────────────────
+
+async function extractYouTubePiped(videoId) {
+  const pipedInstances = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.syncpundit.io",
+    "https://pipedapi.drgns.space"
+  ];
+
+  let lastError = null;
+
+  for (const api of pipedInstances) {
+    try {
+      const res = await fetch(`${api}/streams/${videoId}`);
+      if (!res.ok) throw new Error(`Piped API ${api} failed with status ${res.status}`);
+      const data = await res.json();
+
+      if (data.error) throw new Error(`Piped Error: ${data.error}`);
+
+      const formats = [];
+      
+      // Process video streams
+      if (data.videoStreams) {
+        data.videoStreams.forEach(stream => {
+          formats.push({
+            url: stream.url,
+            ext: "mp4",
+            format_note: `${stream.quality} (Piped)`,
+            hasVideo: true,
+            hasAudio: stream.videoOnly === false,
+            resolution: stream.quality
+          });
+        });
+      }
+
+      // Process audio streams
+      if (data.audioStreams) {
+        data.audioStreams.forEach(stream => {
+          formats.push({
+            url: stream.url,
+            ext: "m4a",
+            format_note: `Audio ${stream.bitrate}bps (Piped)`,
+            hasVideo: false,
+            hasAudio: true
+          });
+        });
+      }
+
+      if (formats.length === 0) throw new Error("No formats found in Piped response");
+
+      return {
+        title: data.title || "YouTube Video",
+        thumbnail: data.thumbnailUrl || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        duration: formatDuration(data.duration),
+        formats: formats,
+        source: `piped-pool (${api})`
+      };
+    } catch (err) {
+      console.warn(`[Piped Fallback] ${err.message}`);
+      lastError = err;
+    }
+  }
+
+  // If even Piped fails, try Innertube
+  console.error("[Extract] Piped Pool failed, falling back to innertube:", lastError?.message);
+  return await extractYouTube(videoId);
 }
 
 async function extractYouTubePlaylist(playlistId) {

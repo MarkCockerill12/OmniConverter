@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWorkers } from "@/hooks/use-workers";
@@ -29,6 +29,9 @@ import {
 import { cn } from "@/lib/utils";
 import { FormatDropdown, StatusBadge, FORMAT_CATEGORIES, getFileCategory } from "@/components/converter/format-selector";
 import type { SceneNode, ThreeDViewerHandle } from "@/components/ui/three-viewer";
+import { MediaEditorModal } from "@/components/converter/media-editors";
+
+import { unzipSync } from "fflate";
 
 const ThreeDViewer = dynamic(() => import("@/components/ui/three-viewer"), { 
   ssr: false,
@@ -40,6 +43,16 @@ const ThreeDViewer = dynamic(() => import("@/components/ui/three-viewer"), {
   )
 });
 
+interface EditOptions {
+  trimStart?: number;
+  trimEnd?: number;
+  crop?: { x: number; y: number; width: number; height: number };
+  resolution?: string;
+  transparencyColor?: string;
+  audioBitrate?: string;
+  frameTimestamp?: number;
+}
+
 interface SelectedFile {
   file: File;
   targetFormat: string;
@@ -47,6 +60,8 @@ interface SelectedFile {
   status: 'idle' | 'processing' | 'completed' | 'error';
   progress: number;
   error?: string;
+  editOptions?: EditOptions;
+  textures?: Record<string, string>; // filename -> blob url
 }
 
 const VIEWPORT_THEMES = [
@@ -64,8 +79,27 @@ export default function Home() {
   const [isDragging, setIsDragging] = useState(false);
   const [isConverting, setIsConverting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  
+
+  // Editor State
+  const [editingFileId, setEditingFileId] = useState<string | null>(null);
+
+  const updateEditOptions = (id: string, options: EditOptions) => {
+    setSelectedFiles(prev => prev.map(f => f.id === id ? { ...f, editOptions: options } : f));
+  };
+
+  const getEditorType = (sf: SelectedFile) => {
+    const category = getFileCategory(sf.file.name);
+    const targetCategory = sf.targetFormat ? getFileCategory(`dummy.${sf.targetFormat}`) : "";
+
+    if (category === "Video" && targetCategory === "Image") return "video-to-image";
+    if (category === "Image" && targetCategory === "Image") return "image";
+    if (category === "Video" && targetCategory === "Video") return "video";
+    if ((category === "Audio" || category === "Video") && targetCategory === "Audio") return "audio";
+    return null;
+  };
+
   // 3D Management State
+  const [selected3DId, setSelected3DId] = useState<string | null>(null);
   const [sceneNodes, setSceneNodes] = useState<SceneNode[]>([]);
   const [hiddenNodes, setHiddenNodes] = useState<string[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -98,24 +132,53 @@ export default function Home() {
     const rect = containerRef.current.getBoundingClientRect();
     const newWidth = e.clientX - rect.left;
     if (newWidth > 150 && newWidth < 600) {
-      // CSS Variable update: The most performant way to resize without React lag
       containerRef.current.style.setProperty('--sidebar-width', `${newWidth}px`);
     }
   };
 
-  const addFiles = (files: FileList | File[]) => {
-    const newFiles = Array.from(files).map(f => ({
-      file: f,
-      targetFormat: "",
-      id: Math.random().toString(36).substring(2, 11),
-      status: 'idle' as const,
-      progress: 0
-    }));
-    setSelectedFiles(prev => [...prev, ...newFiles]);
+  const addFiles = async (files: FileList | File[]) => {
+    const fileList = Array.from(files);
+    const newFiles: SelectedFile[] = [];
+
+    for (const f of fileList) {
+       console.log(`[Main] 📂 Adding file: ${f.name}`);
+       newFiles.push({
+         file: f,
+         targetFormat: "",
+         id: Math.random().toString(36).substring(2, 11),
+         status: 'idle',
+         progress: 0
+       });
+    }
+
+    setSelectedFiles(prev => {
+      const updated = [...prev, ...newFiles];
+      
+      // Auto-select the first 3D model if none is active
+      const hasActive3D = updated.find(sf => sf.id === selected3DId);
+      if (!hasActive3D) {
+        const first3D = updated.find(sf => 
+           sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/)
+        );
+        if (first3D) {
+          console.log(`[Main] 🎯 Auto-selecting 3D: ${first3D.file.name}`);
+          setSelected3DId(first3D.id);
+        }
+      }
+      
+      return updated;
+    });
   };
 
   const removeFile = (id: string) => {
-    setSelectedFiles(prev => prev.filter(f => f.id !== id));
+    setSelectedFiles(prev => {
+      const updated = prev.filter(f => f.id !== id);
+      if (selected3DId === id) {
+        const next3D = updated.find(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/));
+        setSelected3DId(next3D ? next3D.id : null);
+      }
+      return updated;
+    });
   };
 
   const updateFormat = (id: string, format: string) => {
@@ -136,7 +199,46 @@ export default function Home() {
 
     for (const sf of filesToConvert) {
       const category = getFileCategory(sf.file.name);
-      if (category === "3D Model" || category === "Document" || category === "Archive") {
+      const targetCategory = sf.targetFormat ? getFileCategory(`dummy.${sf.targetFormat}`) : "";
+
+      // Allow 3D Model conversion if source is 3D OR source is ZIP and target is 3D
+      const is3D = category === "3D Model" || (category === "Archive" && targetCategory === "3D Model");
+
+      if (is3D) {
+
+        console.log(`[Main] 🛠️ Converting 3D: ${sf.file.name}`);
+        setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'processing', error: undefined, progress: 20 } : f));
+        
+        try {
+          // Check if this model is actually selected in the viewer
+          if (selected3DId === sf.id && viewerRef.current) {
+             console.log(`[Main]   🚀 Requesting viewer export...`);
+             await viewerRef.current.exportGLB();
+             setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'completed', progress: 100 } : f));
+             continue;
+          }
+
+          // Fallback: If not selected, try to select it then convert
+          console.warn(`[Main]   ⚠️ Model ${sf.file.name} is not active in viewer.`);
+          setSelected3DId(sf.id);
+          // Wait for mount
+          await new Promise(r => setTimeout(r, 1500)); 
+          
+          if (viewerRef.current) {
+            await viewerRef.current.exportGLB();
+            setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'completed', progress: 100 } : f));
+          } else {
+            throw new Error("Viewer not available for conversion. Please click the model in the list.");
+          }
+        } catch (err: any) {
+          console.error(`[Main]   ❌ Export failed:`, err);
+          setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'error', error: err.message || "3D Export failed" } : f));
+        }
+        continue;
+      }
+
+      // 2. Handle Audio/Video/Image (FFmpeg)
+      if (category === "Document" || category === "Archive") {
         setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { 
           ...f, 
           status: 'error', 
@@ -173,7 +275,15 @@ export default function Home() {
           }
         };
         mediaWorker.addEventListener('message', handler);
-        mediaWorker.postMessage({ type: 'TRANSCODE', payload: { file: sf.file, targetFormat: sf.targetFormat, fileId: sf.id } });
+        mediaWorker.postMessage({ 
+          type: 'TRANSCODE', 
+          payload: { 
+            file: sf.file, 
+            targetFormat: sf.targetFormat, 
+            fileId: sf.id,
+            options: sf.editOptions
+          } 
+        });
         setTimeout(() => { mediaWorker.removeEventListener('message', handler); resolve(false); }, 300000); 
       });
     }
@@ -183,17 +293,26 @@ export default function Home() {
   const has3D = useMemo(() => {
     return selectedFiles.some(sf => 
       FORMAT_CATEGORIES["3D Model"].includes(sf.targetFormat) || 
-      sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae)$/)
+      sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip)$/)
     );
   }, [selectedFiles]);
 
-  const active3DFile = useMemo(() => {
-    return selectedFiles.find(sf => 
-      sf.file.name.toLowerCase().match(/\.(glb|gltf|obj)$/)
-    )?.file;
+  const active3DFiles = useMemo(() => {
+    return selectedFiles
+      .filter(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip)$/))
+      .map(sf => sf.file);
+  }, [selectedFiles]);
+
+  const all3DTextures = useMemo(() => {
+    const texs: Record<string, Record<string, string>> = {};
+    selectedFiles.forEach(sf => {
+      if (sf.textures) texs[sf.file.name] = sf.textures;
+    });
+    return texs;
   }, [selectedFiles]);
 
   const renderNodeTree = (nodes: SceneNode[], depth = 0) => {
+
     return nodes.map((node) => (
       <div key={node.id} className="py-0.5 w-full">
         <div 
@@ -252,10 +371,23 @@ export default function Home() {
             <div className="p-6">
               <div className="space-y-3 mb-8">
                 {selectedFiles.map((sf) => (
-                  <motion.div key={sf.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between p-4 bg-black/20 rounded-2xl border border-white/5">
+                  <motion.div 
+                    key={sf.id} 
+                    onClick={() => {
+                       if (sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/)) {
+                          setSelected3DId(sf.id);
+                       }
+                    }}
+                    initial={{ opacity: 0, y: 10 }} 
+                    animate={{ opacity: 1, y: 0 }} 
+                    className={cn(
+                       "flex items-center justify-between p-4 bg-black/20 rounded-2xl border transition-all cursor-pointer",
+                       selected3DId === sf.id ? "border-[#e11d48] shadow-lg shadow-[#e11d48]/5" : "border-white/5 hover:border-white/10"
+                    )}
+                  >
                     <div className="flex items-center gap-4 flex-1">
                       <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center border border-white/10">
-                        {sf.file.name.toLowerCase().match(/\.(glb|obj|stl)$/) ? <Box className="w-5 h-5 text-purple-400" /> : <FileVideo className="w-5 h-5 text-blue-400" />}
+                        {sf.file.name.toLowerCase().match(/\.(glb|obj|stl|zip|dae)$/) ? <Box className="w-5 h-5 text-purple-400" /> : <FileVideo className="w-5 h-5 text-blue-400" />}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
@@ -269,8 +401,19 @@ export default function Home() {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-6">
+                    <div className="flex items-center gap-6" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-4">
+                        {getEditorType(sf) && (
+                          <button 
+                            onClick={() => setEditingFileId(sf.id)}
+                            className="p-2 hover:bg-white/5 rounded-lg transition-colors text-neutral-500 hover:text-white flex items-center gap-2 group/edit"
+                          >
+                            <Settings2 className={cn("w-4 h-4 transition-transform group-hover/edit:rotate-90", sf.editOptions && "text-[#e11d48] fill-[#e11d48]/20")} />
+                            <span className="text-[10px] font-black uppercase tracking-widest hidden md:block">
+                              {sf.editOptions ? "Edited" : "Edit"}
+                            </span>
+                          </button>
+                        )}
                         <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded border border-white/10 text-[10px] font-black uppercase tracking-widest">{sf.file.name.split('.').pop()?.toUpperCase()}</div>
                         <ArrowRight className="w-4 h-4 text-neutral-600" />
                         <FormatDropdown value={sf.targetFormat} onChange={(val) => updateFormat(sf.id, val)} sourceFileName={sf.file.name} />
@@ -302,8 +445,27 @@ export default function Home() {
             </div>
           )}
         </div>
-        <input type="file" ref={fileInputRef} multiple onChange={(e) => e.target.files && addFiles(e.target.files)} className="hidden" />
+        <input 
+          type="file" 
+          ref={fileInputRef} 
+          multiple 
+          accept=".zip,image/*,video/*,audio/*,.glb,.gltf,.obj,.stl"
+          onChange={(e) => e.target.files && addFiles(e.target.files)} 
+          className="hidden" 
+        />
       </section>
+
+      {/* Media Editor Modal */}
+      {editingFileId && (
+        <MediaEditorModal 
+          isOpen={!!editingFileId}
+          onClose={() => setEditingFileId(null)}
+          file={selectedFiles.find(f => f.id === editingFileId)!.file}
+          type={getEditorType(selectedFiles.find(f => f.id === editingFileId)!) as any}
+          initialOptions={selectedFiles.find(f => f.id === editingFileId)?.editOptions}
+          onSave={(options) => updateEditOptions(editingFileId, options)}
+        />
+      )}
 
       {/* 3D Forge Section */}
       <AnimatePresence>
@@ -340,8 +502,21 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
-                {active3DFile && (
-                  <button onClick={() => viewerRef.current?.exportGLB()} className="flex items-center gap-3 px-8 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-900/40 active:scale-95 group shrink-0">
+                {active3DFiles.length > 0 && (
+                  <button 
+                    onClick={() => {
+                      // Logic: Look for any 3D format selected in the list to use as the master format
+                      // Defaults to GLB if none or incompatible selected
+                      const preferredFormat = selectedFiles.find(sf => 
+                        sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/) && 
+                        sf.targetFormat && 
+                        ['glb', 'gltf', 'obj', 'stl'].includes(sf.targetFormat)
+                      )?.targetFormat || 'glb';
+                      
+                      viewerRef.current?.exportGLB(preferredFormat);
+                    }} 
+                    className="flex items-center gap-3 px-8 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-sm font-black uppercase tracking-widest transition-all shadow-xl shadow-emerald-900/40 active:scale-95 group shrink-0"
+                  >
                     <Download className="w-4 h-4 group-hover:animate-bounce" /> Export Master Model
                   </button>
                 )}
@@ -376,8 +551,15 @@ export default function Home() {
 
                 {/* Viewport - Flex-1 ensures it always fills space */}
                 <div className="flex-1 min-w-0 relative bg-neutral-200 overflow-hidden">
-                  {active3DFile ? (
-                     <ThreeDViewer ref={viewerRef} file={active3DFile} onNodesLoaded={setSceneNodes} hiddenNodes={hiddenNodes} backgroundColor={viewportTheme.color} />
+                  {active3DFiles.length > 0 ? (
+                     <ThreeDViewer 
+                       ref={viewerRef} 
+                       files={active3DFiles} 
+                       textures={all3DTextures}
+                       onNodesLoaded={setSceneNodes} 
+                       hiddenNodes={hiddenNodes} 
+                       backgroundColor={viewportTheme.color} 
+                     />
                   ) : (
                     <div className="flex flex-col items-center justify-center h-full bg-[#16191d]">
                       <Box className="w-32 h-32 text-white/5 animate-pulse" />
@@ -389,13 +571,34 @@ export default function Home() {
                     <motion.div animate={{ rotate: isSidebarOpen ? 180 : 0 }}><ArrowRight className="w-4 h-4" /></motion.div>
                   </button>
 
+                  {/* Model Catalog Selection Bar */}
+                  <div className="absolute top-4 left-20 right-4 z-40 flex items-center gap-2 overflow-x-auto no-scrollbar pointer-events-none">
+                     {selectedFiles.filter(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip)$/)).map((m) => (
+                        <button 
+                          key={m.id}
+                          onClick={() => {
+                            setSelected3DId(prev => prev === m.id ? null : m.id); // Toggle active focus
+                          }}
+                          className={cn(
+                            "px-4 py-2 rounded-xl border backdrop-blur-md transition-all pointer-events-auto shrink-0 flex items-center gap-2",
+                            selected3DId === m.id
+                              ? "bg-[#e11d48] border-[#e11d48] text-white shadow-lg shadow-[#e11d48]/20" 
+                              : "bg-[#1f2228]/80 border-white/10 text-neutral-400 hover:bg-[#1f2228] hover:text-white"
+                          )}
+                        >
+                           <Box className="w-3.5 h-3.5" />
+                           <span className="text-[10px] font-black uppercase tracking-widest truncate max-w-[120px]">{m.file.name}</span>
+                        </button>
+                     ))}
+                  </div>
+
                   <div className="absolute bottom-8 left-8 right-8 flex items-center justify-between p-5 bg-[#1f2228]/90 backdrop-blur-xl rounded-2xl border border-white/10 pointer-events-none shadow-2xl z-20">
                      <div className="flex items-center gap-5">
                         <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_15px_rgba(16,185,129,0.5)]" />
-                        <div className="flex flex-col"><p className="text-xs font-black text-white uppercase tracking-wider">Active Workspace</p><p className="text-[10px] font-bold text-neutral-400 italic truncate max-w-[300px]">{active3DFile ? active3DFile.name : "Waiting..."}</p></div>
+                        <div className="flex flex-col"><p className="text-xs font-black text-white uppercase tracking-wider">Active Workspace</p><p className="text-[10px] font-bold text-neutral-400 italic truncate max-w-[300px]">{active3DFiles.length > 0 ? `${active3DFiles.length} Files Active` : "Waiting..."}</p></div>
                      </div>
                      <div className="flex items-center gap-6">
-                        <div className="flex flex-col items-end"><p className="text-[10px] font-black uppercase text-neutral-500 tracking-widest">Nodes</p><p className="text-sm font-black text-[#e11d48]">{hiddenNodes.length}</p></div>
+                        <div className="flex flex-col items-end"><p className="text-[10px] font-black uppercase text-neutral-500 tracking-widest">Total Nodes</p><p className="text-sm font-black text-[#e11d48]">{sceneNodes[0]?.count || 0}</p></div>
                         <div className="h-8 w-px bg-white/10 mx-2" />
                         <div className="flex flex-col items-end"><p className="text-[10px] font-black uppercase text-neutral-500 tracking-widest">Environment</p><p className="text-xs font-bold text-emerald-500 uppercase">{viewportTheme.name}</p></div>
                      </div>
