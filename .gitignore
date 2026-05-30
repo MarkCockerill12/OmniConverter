@@ -37,3 +37,6 @@ temp_extract/
 
 # agent memory
 .agent_memory.json
+
+# debugging
+debugging/

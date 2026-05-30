@@ -158,7 +158,7 @@ export default function Home() {
       const hasActive3D = updated.find(sf => sf.id === selected3DId);
       if (!hasActive3D) {
         const first3D = updated.find(sf => 
-           sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/)
+           sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip|szs|mdl0)$/)
         );
         if (first3D) {
           console.log(`[Main] 🎯 Auto-selecting 3D: ${first3D.file.name}`);
@@ -174,7 +174,7 @@ export default function Home() {
     setSelectedFiles(prev => {
       const updated = prev.filter(f => f.id !== id);
       if (selected3DId === id) {
-        const next3D = updated.find(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/));
+        const next3D = updated.find(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip|szs|mdl0)$/));
         setSelected3DId(next3D ? next3D.id : null);
       }
       return updated;
@@ -293,13 +293,14 @@ export default function Home() {
   const has3D = useMemo(() => {
     return selectedFiles.some(sf => 
       FORMAT_CATEGORIES["3D Model"].includes(sf.targetFormat) || 
-      sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip)$/)
+      sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip|szs|mdl0)$/)
+
     );
   }, [selectedFiles]);
 
   const active3DFiles = useMemo(() => {
     return selectedFiles
-      .filter(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip)$/))
+      .filter(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip|szs|mdl0)$/))
       .map(sf => sf.file);
   }, [selectedFiles]);
 
@@ -374,7 +375,7 @@ export default function Home() {
                   <motion.div 
                     key={sf.id} 
                     onClick={() => {
-                       if (sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/)) {
+                       if (sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip|szs|mdl0)$/)) {
                           setSelected3DId(sf.id);
                        }
                     }}
@@ -387,7 +388,7 @@ export default function Home() {
                   >
                     <div className="flex items-center gap-4 flex-1">
                       <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center border border-white/10">
-                        {sf.file.name.toLowerCase().match(/\.(glb|obj|stl|zip|dae)$/) ? <Box className="w-5 h-5 text-purple-400" /> : <FileVideo className="w-5 h-5 text-blue-400" />}
+                        {sf.file.name.toLowerCase().match(/\.(glb|obj|stl|zip|dae|szs|mdl0)$/) ? <Box className="w-5 h-5 text-purple-400" /> : <FileVideo className="w-5 h-5 text-blue-400" />}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
@@ -449,7 +450,7 @@ export default function Home() {
           type="file" 
           ref={fileInputRef} 
           multiple 
-          accept=".zip,image/*,video/*,audio/*,.glb,.gltf,.obj,.stl"
+          accept=".zip,image/*,video/*,audio/*,.glb,.gltf,.obj,.stl,.szs,.mdl0"
           onChange={(e) => e.target.files && addFiles(e.target.files)} 
           className="hidden" 
         />
@@ -508,7 +509,8 @@ export default function Home() {
                       // Logic: Look for any 3D format selected in the list to use as the master format
                       // Defaults to GLB if none or incompatible selected
                       const preferredFormat = selectedFiles.find(sf => 
-                        sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|dae|zip)$/) && 
+                        sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip|szs|mdl0)$/)
+ && 
                         sf.targetFormat && 
                         ['glb', 'gltf', 'obj', 'stl'].includes(sf.targetFormat)
                       )?.targetFormat || 'glb';
@@ -573,7 +575,7 @@ export default function Home() {
 
                   {/* Model Catalog Selection Bar */}
                   <div className="absolute top-4 left-20 right-4 z-40 flex items-center gap-2 overflow-x-auto no-scrollbar pointer-events-none">
-                     {selectedFiles.filter(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip)$/)).map((m) => (
+                     {selectedFiles.filter(sf => sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip|szs|mdl0)$/)).map((m) => (
                         <button 
                           key={m.id}
                           onClick={() => {

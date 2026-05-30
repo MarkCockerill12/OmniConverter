@@ -11,6 +11,9 @@ import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import { Box, Loader2, AlertCircle, RefreshCw, Layers, Check, X, Eye, EyeOff } from "lucide-react";
 import { unzipSync } from "fflate";
 import { cn } from "@/lib/utils";
+import { useWorkers } from "@/hooks/use-workers";
+import { extractSZS } from "@/lib/nintendo/wii-parser";
+import { WiiLoader } from "@/lib/nintendo/WiiLoader";
 
 interface ThreeDViewerProps {
   files: File[];
@@ -48,6 +51,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
   hiddenNodes = [],
   backgroundColor = "#d1d5db"
 }, ref) => {
+  const { nintendoWorker } = useWorkers();
   const containerRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -60,70 +64,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
   const controlsRef = useRef<OrbitControls | null>(null);
   const modelsGroupRef = useRef<THREE.Group>(new THREE.Group());
   const loadedModelsMap = useRef<Map<string, THREE.Group>>(new Map());
-
-  // 0. BINARY UTILITIES (SZS / RARC Support)
-  const decompressYaz0 = (data: Uint8Array): Uint8Array => {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    if (data.length < 16 || view.getUint32(0) !== 0x59617A30) return data; // Not Yaz0
-
-    const uncompressedSize = view.getUint32(4);
-    const output = new Uint8Array(uncompressedSize);
-    let srcPos = 16, dstPos = 0, codeByte = 0, bitCount = 0;
-
-    while (dstPos < uncompressedSize) {
-      if (bitCount === 0) { codeByte = data[srcPos++]; bitCount = 8; }
-      if (codeByte & 0x80) {
-        output[dstPos++] = data[srcPos++];
-      } else {
-        const b1 = data[srcPos++], b2 = data[srcPos++];
-        const dist = ((b1 & 0x0F) << 8 | b2) + 1;
-        let count = b1 >> 4;
-        if (count === 0) {
-           if (srcPos >= data.length) break;
-           count = data[srcPos++] + 0x12; 
-        } else count += 2;
-        let copySrc = dstPos - dist;
-        for (let i = 0; i < count; i++) {
-           if (dstPos >= uncompressedSize) break;
-           output[dstPos++] = output[copySrc++];
-        }
-      }
-      codeByte = (codeByte << 1) & 0xFF; bitCount--;
-    }
-    return output;
-  };
-
-  const parseRARC = (data: Uint8Array): Record<string, Uint8Array> => {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    if (data.length < 0x20 || view.getUint32(0) !== 0x52415243) return {}; // "RARC"
-
-    const dataHeaderOffset = view.getUint32(8);
-    const fileEntriesOffset = view.getUint32(12) + dataHeaderOffset;
-    const fileEntriesCount = view.getUint32(dataHeaderOffset + 4);
-    const stringTableOffset = view.getUint32(dataHeaderOffset + 8) + dataHeaderOffset;
-    const dataSectionOffset = view.getUint32(0x0C) + dataHeaderOffset;
-
-    const files: Record<string, Uint8Array> = {};
-    const decoder = new TextDecoder();
-
-    for (let i = 0; i < fileEntriesCount; i++) {
-      const entryOffset = fileEntriesOffset + (i * 0x14);
-      const typeFlags = view.getUint16(entryOffset + 4);
-      if (typeFlags & 0x0100) continue; // Directory
-
-      const nameOffset = view.getUint16(entryOffset + 6);
-      const dataOffset = view.getUint32(entryOffset + 8) + dataSectionOffset;
-      const dataSize = view.getUint32(entryOffset + 12);
-
-      let nameEnd = stringTableOffset + nameOffset;
-      while (nameEnd < data.length && data[nameEnd] !== 0) nameEnd++;
-      const name = decoder.decode(data.slice(stringTableOffset + nameOffset, nameEnd));
-
-      if (name === "." || name === "..") continue;
-      files[name] = data.slice(dataOffset, dataOffset + dataSize);
-    }
-    return files;
-  };
+  const discoveryActive = useRef<boolean>(false);
 
   const updateGrid = (scene: THREE.Scene, bgColor: string) => {
     const oldGrid = scene.getObjectByName('scene-grid');
@@ -173,13 +114,14 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
 
   // 1. DISCOVERY EFFECT: Scans ZIPs and files for models
   useEffect(() => {
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0 || !nintendoWorker || discoveryActive.current) return;
     
     const discover = async () => {
       try {
+        discoveryActive.current = true;
         setLoading(true);
         const allDiscovered: InternalModel[] = [];
-        const modelExts = ['dae', 'glb', 'gltf', 'obj', 'stl'];
+        const modelExts = ['dae', 'glb', 'gltf', 'obj', 'stl', 'mdl0'];
         const imageExts = ['png', 'jpg', 'jpeg', 'webp', 'tga', 'dds', 'bmp'];
 
         for (const file of files) {
@@ -193,14 +135,28 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
             if (isZip) {
               unzipped = unzipSync(new Uint8Array(buffer));
             } else {
-              // SZS Support: Yaz0 Decompression -> RARC Parsing
-              const decompressed = decompressYaz0(new Uint8Array(buffer));
-              unzipped = parseRARC(decompressed);
+              // Offload SZS extraction to background worker
+              console.log(`[Viewer] 🚀 Offloading SZS to Worker: ${file.name}`);
+              unzipped = await new Promise((resolve, reject) => {
+                 const handler = (e: MessageEvent) => {
+                    if (e.data.payload?.fileName !== file.name) return;
+                    if (e.data.type === 'EXTRACT_SUCCESS') {
+                       nintendoWorker.removeEventListener('message', handler);
+                       resolve(e.data.payload.files);
+                    } else if (e.data.type === 'EXTRACT_ERROR') {
+                       nintendoWorker.removeEventListener('message', handler);
+                       reject(new Error(e.data.payload.error));
+                    }
+                 };
+                 nintendoWorker.addEventListener('message', handler);
+                 nintendoWorker.postMessage({ type: 'EXTRACT_SZS', payload: { buffer, fileName: file.name } }, [buffer]);
+              });
             }
 
             const zipTextures: Record<string, string> = { ...providedTextures[file.name] };
+            const entries = Object.entries(unzipped);
 
-            Object.entries(unzipped).forEach(([path, data]) => {
+            entries.forEach(([path, data]) => {
               if (data.length === 0) return;
               const normalized = path.replace(/\\/g, '/');
               const filename = normalized.split('/').pop() || normalized;
@@ -214,23 +170,16 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
               }
             });
 
-            Object.entries(unzipped).forEach(([path, data]) => {
+            entries.forEach(([path, data]) => {
               if (data.length === 0) return;
               const ext = path.split('.').pop()?.toLowerCase() || '';
               if (modelExts.includes(ext)) {
                 let finalData: any = data;
                 if (ext === 'dae') {
                   try {
-                    const decoder = new TextDecoder();
-                    let content = decoder.decode(data);
-                    
-                    // TARGETED REPLACEMENT: Fix COLLADA 1.5.0 <ref> tag (Robust Version)
-                    content = content.replace(/<init_from>\s*<ref>([\s\S]*?)<\/ref>\s*<\/init_from>/g, '<init_from>$1</init_from>');
-                    
-                    finalData = new TextEncoder().encode(content);
-                  } catch (e) {
-                    console.warn("[Viewer] DAE Pre-process failed:", e);
-                  }
+                    const content = new TextDecoder().decode(data);
+                    finalData = new TextEncoder().encode(content.replace(/<init_from>\s*<ref>([\s\S]*?)<\/ref>\s*<\/init_from>/g, '<init_from>$1</init_from>'));
+                  } catch (e) { console.warn("[Viewer] DAE Pre-process failed:", e); }
                 }
                 const modelFile = new File([new Blob([finalData as any])], path.replace(/\\/g, '/'));
                 allDiscovered.push({
@@ -269,10 +218,12 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
         console.error("[Viewer] Discovery failed:", e);
         setError("Archive Error");
         setLoading(false);
+      } finally {
+        discoveryActive.current = false;
       }
     };
     discover();
-  }, [files]);
+  }, [files, nintendoWorker]);
 
   // 2. MAIN ENGINE EFFECT
   useEffect(() => {
@@ -396,6 +347,11 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
 
       const onLoad = (object: any) => {
         const model = object.scene || object;
+        
+        // PERFORMANCE OPTIMIZATION: Prepare data outside the traversal
+        const sortedTextureKeys = Object.keys(activeTextures).sort((a, b) => b.length - a.length);
+        const semanticTags = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth", "face", "mouth", "tire", "wheel", "all", "body"];
+
         const applyMaterialFixes = () => {
           model.traverse((child: any) => {
             if (child.isMesh) {
@@ -404,27 +360,32 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                  if (!mat) return;
                  const matName = String(mat.name || "").toLowerCase();
                  const meshName = String(child.name || "").toLowerCase();
-                 const sortedKeys = Object.keys(activeTextures).sort((a, b) => b.length - a.length);
+                 const wiiTexName = String(mat.userData.wiiTextureName || "").toLowerCase();
 
-                 // 1. UNIVERSAL WEIGHTED MATCHER (Surgical)
+                 // 1. UNIVERSAL WEIGHTED MATCHER (Optimized)
                  if (!mat.map) {
                     let bestKey = "";
                     let bestScore = -1;
-                    const tags = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth", "face", "mouth", "tire", "wheel", "all", "body"];
 
-                    for (const key of sortedKeys) {
-                       const texName = key.toLowerCase().split('/').pop()?.replace(/\.[^/.]+$/, "") || "";
+                    for (const key of sortedTextureKeys) {
+                       const texFileName = key.toLowerCase().split('/').pop() || "";
+                       const texBaseName = texFileName.replace(/\.[^/.]+$/, "");
                        let score = 0;
 
-                       if (texName === matName) score += 1000;
-                       if (matName.includes(texName)) score += 500;
-                       if (texName.includes(matName)) score += 400;
+                       // NINTENDO PRIORITY: If we have an explicit texture name from MDL0, try for exact match
+                       if (wiiTexName && (texBaseName === wiiTexName || texFileName === wiiTexName)) {
+                          score += 5000;
+                       }
 
-                       for (const tag of tags) {
+                       if (texBaseName === matName) score += 1000;
+                       if (matName.includes(texBaseName)) score += 500;
+                       if (texBaseName.includes(matName)) score += 400;
+
+                       for (const tag of semanticTags) {
                           const hasMatTag = matName.includes(tag) || meshName.includes(tag);
-                          const hasTexTag = texName.includes(tag);
+                          const hasTexTag = texBaseName.includes(tag);
                           if (hasMatTag && hasTexTag) score += 300;
-                          if (!hasMatTag && hasTexTag) score -= 800; // Strong penalty for specialized textures (like eyes)
+                          if (!hasMatTag && hasTexTag) score -= 800; 
                        }
 
                        if (score > bestScore) {
@@ -457,24 +418,30 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                     if (isOverlay) {
                        mat.transparent = true;
                        mat.vertexColors = false; 
-                       mat.alphaTest = 0.05; // Low threshold to prevent discarding partially transparent features
+                       mat.alphaTest = 0.05; 
                        mat.polygonOffset = true;
                        mat.polygonOffsetFactor = -1;
                        mat.polygonOffsetUnits = -4;
-                       // Stack: Body(0) -> Mouth(5) -> Overlay(10) -> Eyes(15)
                        child.renderOrder = isEye ? 15 : (isMouth ? 5 : 10);
                     } else {
-                       mat.transparent = false; // SOLID BODY (polygon0)
+                       mat.transparent = false; 
                        mat.vertexColors = false; 
-                       mat.alphaTest = 0; // No discarding for body
+                       mat.alphaTest = 0; 
                        child.renderOrder = 0;
                     }
 
                     mat.side = THREE.DoubleSide;
                     mat.depthWrite = true;
                     mat.depthTest = true;
-                    // SURGICAL: MirroredRepeatWrapping helps with eye mirroring issues if UVs are set up for it
-                    mat.map.wrapS = mat.map.wrapT = isEye ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
+                    
+                    // NINTENDO WRAP MODES
+                    if (mat.userData.wrapS !== undefined) {
+                        mat.map.wrapS = mat.userData.wrapS;
+                        mat.map.wrapT = mat.userData.wrapT;
+                    } else {
+                        mat.map.wrapS = mat.map.wrapT = isEye ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
+                    }
+                    
                     mat.map.flipY = true;
                     mat.map.colorSpace = THREE.SRGBColorSpace;
                     mat.map.minFilter = mat.map.magFilter = THREE.LinearFilter;
@@ -511,6 +478,9 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
          const loader = new ColladaLoader(manager);
          if (modelInfo.file.name.includes('/')) loader.setResourcePath(modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/') + 1));
          loader.load(url, (c) => c ? onLoad(c.scene) : null, undefined, () => setLoading(false));
+      } else if (ext === 'mdl0') {
+         const loader = new WiiLoader(manager, nintendoWorker);
+         loader.load(url, (m) => onLoad(m), undefined, () => setLoading(false));
       } else if (ext === 'glb' || ext === 'gltf') new GLTFLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
       else if (ext === 'obj') new OBJLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
       else if (ext === 'stl') new STLLoader(manager).load(url, (g) => onLoad(new THREE.Mesh(g, new THREE.MeshPhongMaterial())), undefined, () => setLoading(false));

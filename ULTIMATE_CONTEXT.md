@@ -27,3 +27,5 @@
 - **DAE Pre-processing:** Strips `<ref>` tags from `<init_from>` blocks in DAE files to support COLLADA 1.5.0.
 - **Material Tuning:** Forces body meshes to be opaque (`transparent: false`) and accessory meshes (eyes, mustache) to be transparent overlays with higher `renderOrder`.
 - **Z-Fighting:** Uses `polygonOffset` and `renderOrder` to manage layered geometry.
+
+- [2026-05-30] **BrawlLib Reverse-Engineering Success**: Implemented bit-perfect MDL0 parsing with version-aware resource mapping and draw-call material linking. Fixed RangeError crashes and resolved 'wonky' textures by extracting native Wii wrap modes and material names.
