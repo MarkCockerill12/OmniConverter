@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Search, ChevronDown, CheckCircle2, CircleDashed } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type Category = "Image" | "3D Model" | "Document" | "Video" | "Audio" | "Archive";
+export type Category = "Image" | "3D Model" | "Document" | "Video" | "Audio" | "Archive" | "Unrecognized";
 
 export const FORMAT_CATEGORIES: Record<Category, string[]> = {
   "Image": ["PNG", "JPG", "WEBP", "GIF", "TIFF", "BMP", "SVG"],
@@ -13,7 +13,8 @@ export const FORMAT_CATEGORIES: Record<Category, string[]> = {
   "Document": ["PDF", "DOCX", "DOC", "TXT", "RTF", "MD"],
   "Video": ["MP4", "WEBM", "MKV", "MOV", "AVI"],
   "Audio": ["MP3", "WAV", "FLAC", "OGG", "M4A"],
-  "Archive": ["ZIP", "RAR", "7Z", "TAR", "GZ"]
+  "Archive": ["ZIP", "RAR", "7Z", "TAR", "GZ"],
+  "Unrecognized": []
 };
 
 // Conversion Restriction Map: Source Category -> Allowed Target Categories
@@ -23,7 +24,8 @@ const ALLOWED_CONVERSIONS: Record<Category, Category[]> = {
   "Audio": ["Audio"],
   "3D Model": ["3D Model"],
   "Document": ["Document"],
-  "Archive": ["Archive", "3D Model"] // Enable ZIP to 3D Model conversion
+  "Archive": ["Archive", "3D Model"],
+  "Unrecognized": []
 };
 
 export function getFileCategory(fileName: string): Category {
@@ -31,7 +33,7 @@ export function getFileCategory(fileName: string): Category {
   for (const [cat, exts] of Object.entries(FORMAT_CATEGORIES)) {
     if (exts.includes(ext)) return cat as Category;
   }
-  return "Image";
+  return "Unrecognized";
 }
 
 export function FormatDropdown({ 
@@ -72,7 +74,10 @@ export function FormatDropdown({
   }, []);
 
   const filteredFormats = useMemo(() => {
-    const formats = FORMAT_CATEGORIES[activeCategory] || [];
+    let formats = FORMAT_CATEGORIES[activeCategory] || [];
+    if (activeCategory === "3D Model") {
+      formats = ["GLB", "GLTF", "OBJ", "STL"];
+    }
     if (!search) return formats;
     return formats.filter(f => f.toLowerCase().includes(search.toLowerCase()));
   }, [activeCategory, search]);

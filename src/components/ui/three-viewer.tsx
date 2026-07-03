@@ -7,7 +7,10 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { ColladaLoader } from "three/examples/jsm/loaders/ColladaLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
+import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
+import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 import { Box, Loader2, AlertCircle, RefreshCw, Layers, Check, X, Eye, EyeOff } from "lucide-react";
 import { unzipSync } from "fflate";
 import { cn } from "@/lib/utils";
@@ -82,23 +85,63 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
   useImperativeHandle(ref, () => ({
     exportGLB: async (format = 'glb', customName?: string) => {
       if (!modelsGroupRef.current) throw new Error("Model not ready.");
+      const lowerFormat = format.toLowerCase();
+
       return new Promise((resolve, reject) => {
-        const exporter = new GLTFExporter();
-        exporter.parse(modelsGroupRef.current, (result) => {
-          const isBinary = format.toLowerCase() === 'glb';
-          const blob = new Blob([isBinary ? result as any : JSON.stringify(result)], { 
-            type: isBinary ? 'model/gltf-binary' : 'application/json' 
-          });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = customName || `Omni_Export_${Date.now()}.${format}`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          resolve();
-        }, (err) => reject(err), { binary: format.toLowerCase() === 'glb', includeCustomExtensions: true });
+        if (lowerFormat === 'obj') {
+          try {
+            const exporter = new OBJExporter();
+            const result = exporter.parse(modelsGroupRef.current);
+            const blob = new Blob([result], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = customName || `Omni_Export_${Date.now()}.obj`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        } else if (lowerFormat === 'stl') {
+          try {
+            const exporter = new STLExporter();
+            const result = exporter.parse(modelsGroupRef.current, { binary: true });
+            const blob = new Blob([result], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = customName || `Omni_Export_${Date.now()}.stl`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        } else if (lowerFormat === 'glb' || lowerFormat === 'gltf') {
+          const exporter = new GLTFExporter();
+          exporter.parse(modelsGroupRef.current, (result) => {
+            const isBinary = lowerFormat === 'glb';
+            const blob = new Blob([isBinary ? result as any : JSON.stringify(result)], { 
+              type: isBinary ? 'model/gltf-binary' : 'application/json' 
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = customName || `Omni_Export_${Date.now()}.${lowerFormat}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            resolve();
+          }, (err) => reject(err), { binary: lowerFormat === 'glb', includeCustomExtensions: true });
+        } else {
+          reject(new Error(`Format ${format.toUpperCase()} is not supported for viewport export.`));
+        }
       });
     }
   }));
@@ -131,12 +174,10 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
           if (isZip || isSzs) {
             const buffer = await file.arrayBuffer();
             let unzipped: Record<string, Uint8Array> = {};
-            
+
             if (isZip) {
               unzipped = unzipSync(new Uint8Array(buffer));
             } else {
-              // Offload SZS extraction to background worker
-              console.log(`[Viewer] 🚀 Offloading SZS to Worker: ${file.name}`);
               unzipped = await new Promise((resolve, reject) => {
                  const handler = (e: MessageEvent) => {
                     if (e.data.payload?.fileName !== file.name) return;
@@ -152,7 +193,6 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                  nintendoWorker.postMessage({ type: 'EXTRACT_SZS', payload: { buffer, fileName: file.name } }, [buffer]);
               });
             }
-
             const zipTextures: Record<string, string> = { ...providedTextures[file.name] };
             const entries = Object.entries(unzipped);
 
@@ -366,15 +406,23 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                  if (!mat.map) {
                     let bestKey = "";
                     let bestScore = -1;
+                    const wiiTextures = (mat.userData.wiiTextures || []) as string[];
 
                     for (const key of sortedTextureKeys) {
                        const texFileName = key.toLowerCase().split('/').pop() || "";
                        const texBaseName = texFileName.replace(/\.[^/.]+$/, "");
                        let score = 0;
 
-                       // NINTENDO PRIORITY: If we have an explicit texture name from MDL0, try for exact match
+                       // NINTENDO PRIORITY: Exact match on any of the material's texture slots
                        if (wiiTexName && (texBaseName === wiiTexName || texFileName === wiiTexName)) {
                           score += 5000;
+                       }
+                       for (const wTex of wiiTextures) {
+                          const wTexLower = wTex.toLowerCase();
+                          if (texBaseName === wTexLower || texFileName === wTexLower) {
+                             score += 4500; // Slightly lower than primary slot but still very high
+                             break;
+                          }
                        }
 
                        if (texBaseName === matName) score += 1000;
@@ -418,11 +466,11 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                     if (isOverlay) {
                        mat.transparent = true;
                        mat.vertexColors = false; 
-                       mat.alphaTest = 0.05; 
+                       mat.alphaTest = 0.5; 
                        mat.polygonOffset = true;
-                       mat.polygonOffsetFactor = -1;
-                       mat.polygonOffsetUnits = -4;
-                       child.renderOrder = isEye ? 15 : (isMouth ? 5 : 10);
+                       mat.polygonOffsetFactor = -2;
+                       mat.polygonOffsetUnits = -8;
+                       child.renderOrder = isEye ? 50 : (isMouth ? 10 : 20);
                     } else {
                        mat.transparent = false; 
                        mat.vertexColors = false; 
@@ -431,7 +479,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                     }
 
                     mat.side = THREE.DoubleSide;
-                    mat.depthWrite = true;
+                    mat.depthWrite = !isOverlay;
                     mat.depthTest = true;
                     
                     // NINTENDO WRAP MODES
@@ -439,10 +487,10 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
                         mat.map.wrapS = mat.userData.wrapS;
                         mat.map.wrapT = mat.userData.wrapT;
                     } else {
-                        mat.map.wrapS = mat.map.wrapT = isEye ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
+                        mat.map.wrapS = mat.map.wrapT = isEye ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
                     }
                     
-                    mat.map.flipY = true;
+                    mat.map.flipY = false; // UVs are already flipped in wii-parser.ts (1.0 - V)
                     mat.map.colorSpace = THREE.SRGBColorSpace;
                     mat.map.minFilter = mat.map.magFilter = THREE.LinearFilter;
                     mat.map.needsUpdate = true;
@@ -472,19 +520,46 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
         setLoading(false);
       };
 
-      const url = URL.createObjectURL(modelInfo.file);
-      const ext = modelInfo.file.name.split('.').pop()?.toLowerCase();
-      if (ext === 'dae') {
-         const loader = new ColladaLoader(manager);
-         if (modelInfo.file.name.includes('/')) loader.setResourcePath(modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/') + 1));
-         loader.load(url, (c) => c ? onLoad(c.scene) : null, undefined, () => setLoading(false));
-      } else if (ext === 'mdl0') {
-         const loader = new WiiLoader(manager, nintendoWorker);
-         loader.load(url, (m) => onLoad(m), undefined, () => setLoading(false));
-      } else if (ext === 'glb' || ext === 'gltf') new GLTFLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
-      else if (ext === 'obj') new OBJLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
-      else if (ext === 'stl') new STLLoader(manager).load(url, (g) => onLoad(new THREE.Mesh(g, new THREE.MeshPhongMaterial())), undefined, () => setLoading(false));
-      else setLoading(false);
+      const loadModel = async () => {
+        const url = URL.createObjectURL(modelInfo.file);
+        const ext = modelInfo.file.name.split('.').pop()?.toLowerCase();
+
+        // Read first 4 bytes to check for GLB magic 'glTF' (0x676c5446)
+        let isDisguisedGLB = false;
+        try {
+          const slice = modelInfo.file.slice(0, 4);
+          const buffer = await slice.arrayBuffer();
+          const view = new DataView(buffer);
+          if (view.byteLength >= 4) {
+            const magic = view.getUint32(0, false); // big-endian
+            isDisguisedGLB = magic === 0x676C5446;
+          }
+        } catch (e) {
+          console.warn("Could not check magic bytes of file:", e);
+        }
+
+        if (isDisguisedGLB || ext === 'glb' || ext === 'gltf') {
+          new GLTFLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
+        } else if (ext === 'fbx') {
+          const loader = new FBXLoader(manager);
+          loader.load(url, (fbx) => onLoad(fbx), undefined, () => setLoading(false));
+        } else if (ext === 'dae') {
+          const loader = new ColladaLoader(manager);
+          if (modelInfo.file.name.includes('/')) loader.setResourcePath(modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/') + 1));
+          loader.load(url, (c) => c ? onLoad(c.scene) : null, undefined, () => setLoading(false));
+        } else if (ext === 'mdl0') {
+          const loader = new WiiLoader(manager, nintendoWorker);
+          loader.load(url, (m) => onLoad(m), undefined, () => setLoading(false));
+        } else if (ext === 'obj') {
+          new OBJLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
+        } else if (ext === 'stl') {
+          new STLLoader(manager).load(url, (g) => onLoad(new THREE.Mesh(g, new THREE.MeshPhongMaterial())), undefined, () => setLoading(false));
+        } else {
+          setLoading(false);
+        }
+      };
+
+      loadModel();
     });
   }, [discoveredModels]);
 

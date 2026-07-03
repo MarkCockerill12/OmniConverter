@@ -24,12 +24,15 @@ import {
   Eye,
   EyeOff,
   Download,
-  Trash2
+  Trash2,
+  FileQuestion,
+  Pencil
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { FormatDropdown, StatusBadge, FORMAT_CATEGORIES, getFileCategory } from "@/components/converter/format-selector";
 import type { SceneNode, ThreeDViewerHandle } from "@/components/ui/three-viewer";
 import { MediaEditorModal } from "@/components/converter/media-editors";
+import { convert3DModelHeadless } from "@/lib/3d-converter";
 
 import { unzipSync } from "fflate";
 
@@ -91,10 +94,22 @@ export default function Home() {
     const category = getFileCategory(sf.file.name);
     const targetCategory = sf.targetFormat ? getFileCategory(`dummy.${sf.targetFormat}`) : "";
 
+    // Video to image (Frame Selection)
     if (category === "Video" && targetCategory === "Image") return "video-to-image";
+    // Video/Audio to audio (Audio Editor)
+    if ((category === "Video" || category === "Audio") && targetCategory === "Audio") return "audio";
+    
+    // Fallback/Default editor when target format is not selected yet
+    if (!sf.targetFormat) {
+      if (category === "Image") return "image";
+      if (category === "Video") return "video";
+      if (category === "Audio") return "audio";
+    }
+
+    // Default editor matches
     if (category === "Image" && targetCategory === "Image") return "image";
     if (category === "Video" && targetCategory === "Video") return "video";
-    if ((category === "Audio" || category === "Video") && targetCategory === "Audio") return "audio";
+
     return null;
   };
 
@@ -205,34 +220,30 @@ export default function Home() {
       const is3D = category === "3D Model" || (category === "Archive" && targetCategory === "3D Model");
 
       if (is3D) {
-
-        console.log(`[Main] 🛠️ Converting 3D: ${sf.file.name}`);
+        console.log(`[Main] 🛠️ Converting 3D headlessly: ${sf.file.name}`);
         setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'processing', error: undefined, progress: 20 } : f));
         
         try {
-          // Check if this model is actually selected in the viewer
-          if (selected3DId === sf.id && viewerRef.current) {
-             console.log(`[Main]   🚀 Requesting viewer export...`);
-             await viewerRef.current.exportGLB();
-             setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'completed', progress: 100 } : f));
-             continue;
-          }
+          const targetFmt = (sf.targetFormat || "glb").toLowerCase();
+          const lastDot = sf.file.name.lastIndexOf('.');
+          const baseName = lastDot !== -1 ? sf.file.name.substring(0, lastDot) : sf.file.name;
+          const outName = `${baseName}_converted.${targetFmt}`;
 
-          // Fallback: If not selected, try to select it then convert
-          console.warn(`[Main]   ⚠️ Model ${sf.file.name} is not active in viewer.`);
-          setSelected3DId(sf.id);
-          // Wait for mount
-          await new Promise(r => setTimeout(r, 1500)); 
+          const blob = await convert3DModelHeadless(sf.file, targetFmt);
           
-          if (viewerRef.current) {
-            await viewerRef.current.exportGLB();
-            setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'completed', progress: 100 } : f));
-          } else {
-            throw new Error("Viewer not available for conversion. Please click the model in the list.");
-          }
+          setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'completed', progress: 100 } : f));
+          
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = outName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
         } catch (err: any) {
-          console.error(`[Main]   ❌ Export failed:`, err);
-          setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'error', error: err.message || "3D Export failed" } : f));
+          console.error(`[Main] ❌ 3D Conversion failed:`, err);
+          setSelectedFiles(prev => prev.map(f => f.id === sf.id ? { ...f, status: 'error', error: err.message || "3D Conversion failed" } : f));
         }
         continue;
       }
@@ -351,10 +362,6 @@ export default function Home() {
         <h1 className="text-5xl md:text-8xl font-black tracking-tighter mb-6 leading-none uppercase">
           Convert <span className="text-[#e11d48]">Any</span> File.
         </h1>
-        <p className="text-xl text-neutral-400 max-w-2xl mx-auto font-medium">
-          Professional-grade browser-based conversion. 
-          <span className="text-white font-bold italic block mt-2 tracking-wide">Zero costs. Zero limits. Total Privacy.</span>
-        </p>
       </section>
 
       {/* Converter App */}
@@ -388,7 +395,13 @@ export default function Home() {
                   >
                     <div className="flex items-center gap-4 flex-1">
                       <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center border border-white/10">
-                        {sf.file.name.toLowerCase().match(/\.(glb|obj|stl|zip|dae|szs|mdl0)$/) ? <Box className="w-5 h-5 text-purple-400" /> : <FileVideo className="w-5 h-5 text-blue-400" />}
+                        {getFileCategory(sf.file.name) === "Unrecognized" ? (
+                          <FileQuestion className="w-5 h-5 text-neutral-500" />
+                        ) : sf.file.name.toLowerCase().match(/\.(glb|obj|stl|zip|dae|szs|mdl0)$/) ? (
+                          <Box className="w-5 h-5 text-purple-400" />
+                        ) : (
+                          <FileVideo className="w-5 h-5 text-blue-400" />
+                        )}
                       </div>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
@@ -404,20 +417,29 @@ export default function Home() {
                     </div>
                     <div className="flex items-center gap-6" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-4">
-                        {getEditorType(sf) && (
-                          <button 
-                            onClick={() => setEditingFileId(sf.id)}
-                            className="p-2 hover:bg-white/5 rounded-lg transition-colors text-neutral-500 hover:text-white flex items-center gap-2 group/edit"
-                          >
-                            <Settings2 className={cn("w-4 h-4 transition-transform group-hover/edit:rotate-90", sf.editOptions && "text-[#e11d48] fill-[#e11d48]/20")} />
-                            <span className="text-[10px] font-black uppercase tracking-widest hidden md:block">
-                              {sf.editOptions ? "Edited" : "Edit"}
-                            </span>
-                          </button>
-                        )}
                         <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded border border-white/10 text-[10px] font-black uppercase tracking-widest">{sf.file.name.split('.').pop()?.toUpperCase()}</div>
-                        <ArrowRight className="w-4 h-4 text-neutral-600" />
-                        <FormatDropdown value={sf.targetFormat} onChange={(val) => updateFormat(sf.id, val)} sourceFileName={sf.file.name} />
+                        {getFileCategory(sf.file.name) === "Unrecognized" ? (
+                          <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded border border-white/5 text-[10px] font-black uppercase tracking-widest text-neutral-500">Unrecognized</div>
+                        ) : (
+                          <>
+                            <ArrowRight className="w-4 h-4 text-neutral-600" />
+                            <FormatDropdown value={sf.targetFormat} onChange={(val) => updateFormat(sf.id, val)} sourceFileName={sf.file.name} />
+                            {getEditorType(sf) && (
+                              <button 
+                                onClick={() => setEditingFileId(sf.id)}
+                                title={sf.editOptions ? "Modify edits" : "Edit media"}
+                                className={cn(
+                                  "p-2.5 rounded-lg border transition-all flex items-center justify-center hover:scale-105 active:scale-95",
+                                  sf.editOptions 
+                                    ? "bg-[#e11d48]/20 border-[#e11d48] text-[#e11d48]" 
+                                    : "bg-white/5 border-white/10 text-neutral-400 hover:text-white hover:border-white/20"
+                                )}
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 border-l border-white/10 pl-6">
                         <button className="p-2 hover:bg-white/5 rounded-lg transition-colors text-neutral-500 hover:text-[#e11d48]" onClick={() => removeFile(sf.id)}><X className="w-5 h-5" /></button>
@@ -450,7 +472,6 @@ export default function Home() {
           type="file" 
           ref={fileInputRef} 
           multiple 
-          accept=".zip,image/*,video/*,audio/*,.glb,.gltf,.obj,.stl,.szs,.mdl0"
           onChange={(e) => e.target.files && addFiles(e.target.files)} 
           className="hidden" 
         />
@@ -511,8 +532,7 @@ export default function Home() {
                       const preferredFormat = selectedFiles.find(sf => 
                         sf.file.name.toLowerCase().match(/\.(glb|gltf|obj|stl|fbx|dae|zip|szs|mdl0)$/)
  && 
-                        sf.targetFormat && 
-                        ['glb', 'gltf', 'obj', 'stl'].includes(sf.targetFormat)
+                        sf.targetFormat
                       )?.targetFormat || 'glb';
                       
                       viewerRef.current?.exportGLB(preferredFormat);

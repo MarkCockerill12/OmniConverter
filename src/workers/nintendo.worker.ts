@@ -11,7 +11,7 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === 'EXTRACT_SZS') {
     try {
       const { buffer, fileName } = payload;
-      console.log(`[Worker] 📦 Starting extraction for: ${fileName} (${buffer.byteLength} bytes)`);
+      console.log(`[Worker] 📦 Starting extraction for: ${fileName}`);
       
       const files = extractSZS(buffer);
       const decodedFiles: Record<string, Uint8Array> = {};
@@ -24,7 +24,7 @@ self.onmessage = async (e: MessageEvent) => {
                   if (result) {
                       const bmp = createBMP(result.rgba, result.width, result.height);
                       decodedFiles[name.replace('.tex0', '.bmp')] = bmp;
-                      transferables.push(bmp.buffer);
+                      transferables.push(bmp.buffer as ArrayBuffer);
                       return;
                   }
               } catch (e) {
@@ -32,10 +32,9 @@ self.onmessage = async (e: MessageEvent) => {
               }
           }
           decodedFiles[name] = data;
-          transferables.push(data.buffer);
+          transferables.push(data.buffer as ArrayBuffer);
       });
 
-      console.log(`[Worker] ✅ Extraction complete: ${Object.keys(decodedFiles).length} files found`);
       self.postMessage({ type: 'EXTRACT_SUCCESS', requestId, payload: { files: decodedFiles, fileName } }, transferables);
     } catch (error: any) {
       console.error(`[Worker] ❌ Extraction error:`, error);
@@ -46,25 +45,17 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === 'PARSE_MDL0') {
     try {
       const { buffer, name } = payload;
-      const requestId = e.data.requestId;
-      console.log(`[Worker] 📐 Parsing MDL0: ${name} (${buffer.byteLength} bytes)`);
-      
       const modelData = parseMDL0(buffer, name);
-      console.log(`[Worker] ✅ MDL0 parsed: ${modelData.nodes.length} nodes`);
-
-      modelData.nodes.forEach((node, i) => {
-          const geo = modelData.geometries[node.geometryIdx];
-          console.log(`[Worker]   Node ${i}: ${node.name} (${geo?.attributes.position.length / 3} vertices)`);
-      });
       
-      // Collect all transferable buffers
+      const matSummary = modelData.materials.map(m => `${m.name} (${m.textures.join(', ') || 'no tex'})`).join(' | ');
+      console.log(`[Worker] 📦 Parsed MDL0: ${name} | Materials: ${matSummary}`);
+
       const transferables: ArrayBuffer[] = [];
       modelData.geometries.forEach(geo => {
-          if (geo.attributes.position) transferables.push(geo.attributes.position.buffer);
-          if (geo.attributes.uv) transferables.push(geo.attributes.uv.buffer);
-          if (geo.attributes.normal) transferables.push(geo.attributes.normal.buffer);
-          if (geo.attributes.color) transferables.push(geo.attributes.color.buffer);
-          if (geo.indices) transferables.push(geo.indices.buffer);
+          if (geo.attributes.position) transferables.push(geo.attributes.position.buffer as ArrayBuffer);
+          if (geo.attributes.normal) transferables.push(geo.attributes.normal.buffer as ArrayBuffer);
+          if (geo.attributes.uv) transferables.push(geo.attributes.uv.buffer as ArrayBuffer);
+          if (geo.indices) transferables.push(geo.indices.buffer as ArrayBuffer);
       });
 
       self.postMessage({ type: 'PARSE_MDL0_SUCCESS', requestId, payload: { modelData, name } }, transferables);

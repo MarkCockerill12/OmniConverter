@@ -29,10 +29,13 @@ export function useWorkers() {
     mw.onmessage = (e) => {
       if (e.data.type === 'INIT_SUCCESS') { setMediaReady(true); setLowRam(e.data.isLowRam); }
     };
+    mw.postMessage({ type: 'INIT' });
 
     // 2. Scraper Worker
     const sw = new Worker(new URL('../workers/scraper.worker.ts', import.meta.url));
     sw.onmessage = (e) => { if (e.data.type === 'INIT_SUCCESS') setScraperReady(true); };
+    const proxyUrl = process.env.NEXT_PUBLIC_SCRAPER_API_URL || '/api/extract';
+    sw.postMessage({ type: 'INIT', payload: { proxyUrl } });
 
     // 3. Binary Worker
     const bw = new Worker(new URL('../workers/binary.worker.ts', import.meta.url));

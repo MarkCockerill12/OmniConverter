@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Navbar } from "@/components/layout/navbar";
+import { CookieBanner } from "@/components/layout/cookie-banner";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -17,6 +18,7 @@ export default function RootLayout({
       <body className="antialiased bg-[#0f1115] text-white">
         <Navbar />
         {children}
+        <CookieBanner />
       </body>
     </html>
   );

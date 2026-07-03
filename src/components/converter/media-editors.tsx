@@ -46,6 +46,7 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
   const [options, setOptions] = useState<EditOptions>(initialOptions || {});
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -72,6 +73,16 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
       return () => URL.revokeObjectURL(url);
     }
   }, [isOpen, file, type]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      if (videoRef.current) videoRef.current.pause();
+      if (audioRef.current) audioRef.current.pause();
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+    }
+  }, [isOpen]);
 
   const onCropComplete = useCallback((_: Area, pixelCrop: Area) => {
     setOptions(prev => ({
@@ -124,12 +135,6 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button 
-                   onClick={handleSave}
-                   className="px-6 py-2.5 bg-[#e11d48] hover:bg-[#be123c] rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-[#e11d48]/20 flex items-center gap-2"
-                >
-                   <Check className="w-4 h-4" /> Save Changes
-                </button>
                 <button onClick={onClose} className="p-2.5 hover:bg-white/5 rounded-full transition-colors"><X className="w-6 h-6" /></button>
               </div>
             </div>
@@ -231,13 +236,54 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
                     </div>
                   </div>
                 )}
-                {type === 'audio' && (
-                   <div className="flex flex-col items-center gap-6">
-                      <div className="w-32 h-32 bg-[#e11d48]/10 rounded-[2rem] border-2 border-[#e11d48]/20 flex items-center justify-center">
-                         <Volume2 className="w-12 h-12 text-[#e11d48]" />
-                      </div>
-                      <p className="text-neutral-400 font-bold uppercase tracking-widest text-xs">Audio Waveform Analysis...</p>
-                   </div>
+                {type === 'audio' && previewUrl && (
+                  <div className="w-full h-full flex flex-col gap-6 items-center justify-center p-6">
+                    <div className={cn(
+                      "w-32 h-32 bg-[#e11d48]/10 rounded-[2rem] border border-[#e11d48]/20 flex items-center justify-center shadow-lg shadow-[#e11d48]/10 transition-all",
+                      isPlaying && "animate-pulse scale-105 shadow-[#e11d48]/20"
+                    )}>
+                      <Volume2 className="w-12 h-12 text-[#e11d48]" />
+                    </div>
+                    
+                    <audio 
+                      ref={audioRef}
+                      src={previewUrl}
+                      onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                      onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+                    />
+
+                    {/* Audio Controls */}
+                    <div className="w-full max-w-lg bg-black/60 backdrop-blur-md rounded-2xl p-4 border border-white/5 flex flex-col gap-3">
+                       <div className="flex items-center gap-4">
+                         <button 
+                           onClick={() => {
+                             const el = audioRef.current;
+                             if (el?.paused) {
+                               el.play();
+                               setIsPlaying(true);
+                             } else {
+                               el?.pause();
+                               setIsPlaying(false);
+                             }
+                           }}
+                           className="w-10 h-10 bg-[#e11d48] rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shrink-0"
+                         >
+                           {isPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
+                         </button>
+                         <div className="flex-1 h-1.5 bg-white/10 rounded-full relative overflow-hidden group cursor-pointer" onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const x = e.clientX - rect.left;
+                            const pct = x / rect.width;
+                            if (audioRef.current) audioRef.current.currentTime = pct * duration;
+                         }}>
+                            <div className="absolute inset-y-0 left-0 bg-[#e11d48]" style={{ width: `${(currentTime/duration)*100}%` }} />
+                         </div>
+                         <span className="text-[10px] font-mono font-bold text-neutral-400 shrink-0">
+                           {currentTime.toFixed(2)}s / {duration.toFixed(2)}s
+                         </span>
+                       </div>
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -363,7 +409,7 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
                   </>
                 )}
 
-                {(type === 'video' || type === 'video-to-image') && (
+                {(type === 'video' || type === 'video-to-image' || type === 'audio') && (
                   <>
                     <EditorSection title={type === 'video-to-image' ? "Target Frame" : "Time Logic"} icon={<Scissors className="w-4 h-4" />}>
                        {type === 'video-to-image' ? (
@@ -437,12 +483,12 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
                   </EditorSection>
                 )}
 
-                <div className="pt-8 border-t border-white/5 flex gap-3">
-                   <button onClick={onClose} className="flex-1 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-colors">Discard</button>
-                   <button onClick={handleSave} className="flex-[1.5] py-4 bg-[#e11d48] hover:bg-[#be123c] rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl shadow-[#e11d48]/20 flex items-center justify-center gap-2 group">
-                      Save Manifest <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                   </button>
-                </div>
+                 <div className="pt-8 border-t border-white/5 flex gap-3">
+                    <button onClick={onClose} className="flex-1 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-colors">Discard</button>
+                    <button onClick={handleSave} className="flex-[1.5] py-4 bg-[#e11d48] hover:bg-[#be123c] rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl shadow-[#e11d48]/20 flex items-center justify-center gap-2 group">
+                       Save <Check className="w-4 h-4" />
+                    </button>
+                 </div>
               </div>
             </div>
           </motion.div>

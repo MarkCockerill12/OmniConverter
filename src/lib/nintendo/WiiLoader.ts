@@ -13,7 +13,7 @@ export class WiiLoader extends THREE.Loader {
         this.worker = worker || null;
     }
 
-    load(url: string, onLoad: (group: THREE.Group) => void, onProgress?: (event: ProgressEvent) => void, onError?: (event: ErrorEvent) => void) {
+    load(url: string, onLoad: (group: THREE.Group) => void, onProgress?: (event: ProgressEvent) => void, onError?: (err: any) => void) {
         const loader = new THREE.FileLoader(this.manager);
         loader.setPath(this.path);
         loader.setResponseType('arraybuffer');
@@ -70,6 +70,10 @@ export class WiiLoader extends THREE.Loader {
                 geometry.setAttribute('position', new THREE.BufferAttribute(geoData.attributes.position, 3));
             }
             
+            if (geoData.attributes.normal) {
+                geometry.setAttribute('normal', new THREE.BufferAttribute(geoData.attributes.normal, 3));
+            }
+
             if (geoData.attributes.uv) {
                 geometry.setAttribute('uv', new THREE.BufferAttribute(geoData.attributes.uv, 2));
             }
@@ -78,16 +82,15 @@ export class WiiLoader extends THREE.Loader {
                 geometry.setIndex(new THREE.BufferAttribute(geoData.indices, 1));
             }
             
-            geometry.computeVertexNormals();
+            if (!geoData.attributes.normal) geometry.computeVertexNormals();
 
             // Resolve material information
             let materialName = node.name;
-            let wrapS = THREE.RepeatWrapping;
-            let wrapT = THREE.RepeatWrapping;
+            let wrapS: THREE.Wrapping = THREE.RepeatWrapping;
+            let wrapT: THREE.Wrapping = THREE.RepeatWrapping;
 
             if (node.materialIdx !== undefined && modelData.materials[node.materialIdx]) {
                 const matInfo = modelData.materials[node.materialIdx];
-                // Use the Material Name for heuristic matching if available, otherwise fallback to texture name
                 materialName = matInfo.name;
                 
                 const mapWrap = (w: number) => {
@@ -107,10 +110,10 @@ export class WiiLoader extends THREE.Loader {
                 name: materialName
             });
 
-            // If we have a texture name, we can store it in userData for the viewer to find it more easily
             if (node.materialIdx !== undefined && modelData.materials[node.materialIdx]) {
                 const matInfo = modelData.materials[node.materialIdx];
                 material.userData.wiiTextureName = matInfo.texture;
+                material.userData.wiiTextures = matInfo.textures;
                 material.userData.wrapS = wrapS;
                 material.userData.wrapT = wrapT;
             }

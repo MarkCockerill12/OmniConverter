@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/components/converter/format-selector";
+import { PasswordGate } from "@/components/downloader/password-gate";
 
 const PLATFORM_MAP: Record<string, { label: string, color: string, icon: string }> = {
   youtube:    { label: 'YouTube',    color: '#FF0000', icon: '▶' },
@@ -52,11 +53,13 @@ function detectPlatformFrontend(url: string) {
 export default function DownloaderPage() {
   const { scraperWorker } = useWorkers();
   const { isScraperReady } = useStore();
+  const [isAuthorized, setIsAuthorized] = useState(false);
   const [url, setUrl] = useState("");
   const [isScraping, setIsScraping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
   const [isAudioOnly, setIsAudioOnly] = useState(false);
+
   
   const [downloadState, setDownloadState] = useState({ active: false, progress: 0, filename: '' });
   const platform = detectPlatformFrontend(url);
@@ -159,6 +162,10 @@ export default function DownloaderPage() {
     }
   };
 
+  if (!isAuthorized) {
+    return <PasswordGate onAuthorized={() => setIsAuthorized(true)} />;
+  }
+
   return (
     <main className="max-w-[1200px] mx-auto px-6 py-12">
       <section className="text-center mb-16">
@@ -216,14 +223,7 @@ export default function DownloaderPage() {
             </button>
           </div>
 
-          <div className="flex items-center justify-between mb-12">
-            <div className="flex items-center gap-6">
-              <StatusBadge label="Scraper Engine" ready={isScraperReady} />
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                <Globe className="w-3 h-3" /> Cloudflare Bypass Active
-              </div>
-            </div>
-
+          <div className="flex items-center justify-end mb-12">
             {/* Audio Toggle */}
             <div className="flex items-center gap-3">
               <span className="text-xs font-bold uppercase tracking-wider text-neutral-400">Audio Only</span>
