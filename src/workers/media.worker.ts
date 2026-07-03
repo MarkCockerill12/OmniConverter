@@ -129,7 +129,8 @@ self.onmessage = async (e: MessageEvent) => {
         'mp4': 'video/mp4', 'mkv': 'video/x-matroska', 'avi': 'video/x-msvideo',
         'mov': 'video/quicktime', 'mp3': 'audio/mpeg', 'wav': 'audio/wav',
         'ogg': 'audio/ogg', 'flac': 'audio/flac', 'gif': 'image/gif',
-        'webp': 'image/webp', 'png': 'image/png', 'jpg': 'image/jpeg'
+        'webp': 'image/webp', 'png': 'image/png', 'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg'
       };
       
       const blob = new Blob([data as any], { type: mimeTypes[targetFormat.toLowerCase()] || 'application/octet-stream' });

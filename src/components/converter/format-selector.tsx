@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 export type Category = "Image" | "3D Model" | "Document" | "Video" | "Audio" | "Archive" | "Unrecognized";
 
 export const FORMAT_CATEGORIES: Record<Category, string[]> = {
-  "Image": ["PNG", "JPG", "WEBP", "GIF", "TIFF", "BMP", "SVG"],
+  "Image": ["PNG", "JPG", "JPEG", "WEBP", "GIF", "TIFF", "BMP", "SVG"],
   "3D Model": ["GLB", "GLTF", "OBJ", "STL", "FBX", "DAE", "3MF", "PLY", "SZS", "MDL0"],
   "Document": ["PDF", "DOCX", "DOC", "TXT", "RTF", "MD"],
   "Video": ["MP4", "WEBM", "MKV", "MOV", "AVI"],
