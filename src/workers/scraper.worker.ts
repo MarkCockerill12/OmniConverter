@@ -57,14 +57,20 @@ self.onmessage = async (e: MessageEvent) => {
       }
       
       console.log(`[Worker] Routing through: ${proxyExtractUrl}`);
-      const response = await fetch(proxyExtractUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({ url: targetUrl }),
-      });
+      let response: Response;
+      try {
+        response = await fetch(proxyExtractUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+          },
+          body: JSON.stringify({ url: targetUrl }),
+        });
+      } catch {
+        // A network-level failure means the backend itself is unreachable.
+        throw new Error(`Could not reach the extraction backend at ${new URL(proxyExtractUrl).origin}. Check that the scraper is online and NEXT_PUBLIC_SCRAPER_API_URL is correct.`);
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -172,7 +178,7 @@ self.onmessage = async (e: MessageEvent) => {
       self.postMessage({ type: 'SCRAPE_SUCCESS', result: cleanResult });
     } catch (error) {
       console.error('[Worker] Scraping Error:', error);
-      self.postMessage({ type: 'SCRAPE_ERROR', error: String(error) });
+      self.postMessage({ type: 'SCRAPE_ERROR', error: error instanceof Error ? error.message : String(error) });
     }
   }
 };

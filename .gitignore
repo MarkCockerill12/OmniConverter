@@ -40,3 +40,6 @@ temp_extract/
 
 # debugging
 debugging/
+
+# local scripts (browser e2e harness)
+scripts/

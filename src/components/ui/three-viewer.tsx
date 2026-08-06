@@ -1,579 +1,321 @@
 "use client";
 
-import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
+import { useEffect, useRef, useState, useImperativeHandle, forwardRef, useCallback } from "react";
 import * as THREE from "three";
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
-import { ColladaLoader } from "three/examples/jsm/loaders/ColladaLoader.js";
-import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
-import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
-import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
-import { Box, Loader2, AlertCircle, RefreshCw, Layers, Check, X, Eye, EyeOff } from "lucide-react";
-import { unzipSync } from "fflate";
-import { cn } from "@/lib/utils";
+import { Loader2, AlertCircle, Layers, Check, X, Eye, EyeOff } from "lucide-react";
+import { cn, downloadBlob } from "@/lib/utils";
 import { useWorkers } from "@/hooks/use-workers";
-import { extractSZS } from "@/lib/nintendo/wii-parser";
-import { WiiLoader } from "@/lib/nintendo/WiiLoader";
+import { useThreeScene, type Projection } from "@/hooks/use-three-scene";
+import {
+  discoverModels,
+  loadModelObject,
+  exportModel,
+  revokeTextures,
+  type DiscoveredModel,
+  type ExportOptions,
+} from "@/lib/3d-converter";
+import {
+  applyMaterialFixes,
+  applyDisplayMode,
+  collectStats,
+  createTextureResolver,
+  disposeObject,
+  isConsoleModel,
+  type DisplayMode,
+  type SceneStats,
+  type TextureMap,
+} from "@/lib/3d-materials";
 
 interface ThreeDViewerProps {
   files: File[];
-  textures?: Record<string, Record<string, string>>; // filename -> (subfilename -> blob url)
+  textures?: Record<string, TextureMap>; // filename -> (subfilename -> blob url)
   onNodesLoaded?: (nodes: SceneNode[]) => void;
+  onStats?: (stats: SceneStats) => void;
+  onAnimations?: (clips: { name: string; duration: number }[]) => void;
+  onAnimationTime?: (time: number) => void;
+  /** Fired when a console model is detected, so the UI can default to unlit. */
+  onConsoleModel?: (isConsole: boolean) => void;
   hiddenNodes?: string[];
   backgroundColor?: string;
+  displayMode?: DisplayMode;
+  unlit?: boolean;
+  projection?: Projection;
+  activeClip?: string | null;
+  isPlaying?: boolean;
 }
 
 export interface SceneNode {
   id: string;
   name: string;
   type: string;
-  count?: number; 
+  count?: number;
   children: SceneNode[];
 }
 
-interface InternalModel {
+interface InternalModel extends DiscoveredModel {
   id: string;
-  name: string;
-  file: File;
-  textures: Record<string, string>;
-  sourceName: string;
   visible: boolean;
 }
 
 export interface ThreeDViewerHandle {
-  exportGLB: (format?: string, customName?: string) => Promise<void>;
+  exportGLB: (format?: string, customName?: string, options?: ExportOptions) => Promise<void>;
+  frameCamera: () => void;
+  seekAnimation: (time: number) => void;
 }
 
-const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({ 
-  files, 
+const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
+  files,
   textures: providedTextures = {},
-  onNodesLoaded, 
+  onNodesLoaded,
+  onStats,
+  onAnimations,
+  onAnimationTime,
+  onConsoleModel,
   hiddenNodes = [],
-  backgroundColor = "#d1d5db"
+  backgroundColor = "#d1d5db",
+  displayMode = "shaded",
+  unlit = false,
+  projection = "perspective",
+  activeClip = null,
+  isPlaying = true,
 }, ref) => {
-  const { nintendoWorker } = useWorkers();
-  const containerRef = useRef<HTMLDivElement>(null);
+  const { nintendoWorker } = useWorkers("nintendo");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [discoveredModels, setDiscoveredModels] = useState<InternalModel[]>([]);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  
-  const sceneRef = useRef<THREE.Scene | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const controlsRef = useRef<OrbitControls | null>(null);
-  const modelsGroupRef = useRef<THREE.Group>(new THREE.Group());
-  const loadedModelsMap = useRef<Map<string, THREE.Group>>(new Map());
-  const discoveryActive = useRef<boolean>(false);
 
-  const updateGrid = (scene: THREE.Scene, bgColor: string) => {
-    const oldGrid = scene.getObjectByName('scene-grid');
-    if (oldGrid) scene.remove(oldGrid);
-    const color = new THREE.Color(bgColor);
-    const isDark = (color.r * 0.299 + color.g * 0.587 + color.b * 0.114) < 0.5;
-    const gridColor = isDark ? 0xffffff : 0x000000;
-    const grid = new THREE.GridHelper(100, 100, gridColor, gridColor);
-    grid.name = 'scene-grid';
-    grid.material.transparent = true;
-    grid.material.opacity = isDark ? 0.05 : 0.1;
-    scene.add(grid);
-  };
+  const loadedModelsMap = useRef<Map<string, THREE.Group>>(new Map());
+  const textureMapsRef = useRef<TextureMap[]>([]);
+  const discoveryToken = useRef(0);
+  const mixersRef = useRef<THREE.AnimationMixer[]>([]);
+  const actionRef = useRef<THREE.AnimationAction | null>(null);
+  const playingRef = useRef(isPlaying);
+  playingRef.current = isPlaying;
+
+  const onFrame = useCallback((delta: number) => {
+    if (mixersRef.current.length === 0) return;
+    if (playingRef.current) {
+      for (const mixer of mixersRef.current) mixer.update(delta);
+      if (actionRef.current) onAnimationTime?.(actionRef.current.time);
+    }
+  }, [onAnimationTime]);
+
+  const { containerRef, sceneRef, modelsGroupRef, frameCamera, setProjection } = useThreeScene({
+    backgroundColor,
+    onFrame,
+  });
+
+  const unlitRef = useRef(unlit);
+  unlitRef.current = unlit;
+
+  useEffect(() => { setProjection(projection); }, [projection, setProjection]);
+  useEffect(() => {
+    applyDisplayMode(modelsGroupRef.current, displayMode, unlit);
+  }, [displayMode, unlit, modelsGroupRef, discoveredModels]);
 
   useImperativeHandle(ref, () => ({
-    exportGLB: async (format = 'glb', customName?: string) => {
-      if (!modelsGroupRef.current) throw new Error("Model not ready.");
+    exportGLB: async (format = "glb", customName?: string, options?: ExportOptions) => {
       const lowerFormat = format.toLowerCase();
-
-      return new Promise((resolve, reject) => {
-        if (lowerFormat === 'obj') {
-          try {
-            const exporter = new OBJExporter();
-            const result = exporter.parse(modelsGroupRef.current);
-            const blob = new Blob([result], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = customName || `Omni_Export_${Date.now()}.obj`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        } else if (lowerFormat === 'stl') {
-          try {
-            const exporter = new STLExporter();
-            const result = exporter.parse(modelsGroupRef.current, { binary: true });
-            const blob = new Blob([result], { type: 'application/octet-stream' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = customName || `Omni_Export_${Date.now()}.stl`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        } else if (lowerFormat === 'glb' || lowerFormat === 'gltf') {
-          const exporter = new GLTFExporter();
-          exporter.parse(modelsGroupRef.current, (result) => {
-            const isBinary = lowerFormat === 'glb';
-            const blob = new Blob([isBinary ? result as any : JSON.stringify(result)], { 
-              type: isBinary ? 'model/gltf-binary' : 'application/json' 
-            });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = customName || `Omni_Export_${Date.now()}.${lowerFormat}`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            resolve();
-          }, (err) => reject(err), { binary: lowerFormat === 'glb', includeCustomExtensions: true });
-        } else {
-          reject(new Error(`Format ${format.toUpperCase()} is not supported for viewport export.`));
-        }
-      });
-    }
+      // Export the authored materials, never the wireframe/normal preview.
+      applyDisplayMode(modelsGroupRef.current, "shaded", false);
+      try {
+        const blob = await exportModel(modelsGroupRef.current, lowerFormat, options);
+        downloadBlob(blob, customName || `Omni_Export_${Date.now()}.${lowerFormat}`);
+      } finally {
+        applyDisplayMode(modelsGroupRef.current, displayMode, unlitRef.current);
+      }
+    },
+    frameCamera,
+    seekAnimation: (time: number) => {
+      if (!actionRef.current) return;
+      actionRef.current.time = time;
+      for (const mixer of mixersRef.current) mixer.update(0);
+    },
   }));
 
-  const applyVisibility = () => {
+  const applyVisibility = useCallback(() => {
     modelsGroupRef.current.traverse((child) => {
-      const shouldHide = hiddenNodes.includes(child.uuid) || hiddenNodes.includes(child.name);
-      child.visible = !shouldHide;
+      child.visible = !(hiddenNodes.includes(child.uuid) || hiddenNodes.includes(child.name));
     });
-  };
+  }, [hiddenNodes, modelsGroupRef]);
 
-  useEffect(() => { applyVisibility(); }, [hiddenNodes]);
+  useEffect(() => { applyVisibility(); }, [applyVisibility]);
 
-  // 1. DISCOVERY EFFECT: Scans ZIPs and files for models
+  const updateNodeTree = useCallback(() => {
+    let totalCount = 0;
+    const extract = (obj: THREE.Object3D): SceneNode => {
+      totalCount++;
+      return { id: obj.uuid, name: obj.name || obj.type, type: obj.type, children: obj.children.map(extract) };
+    };
+    const rootNodes = Array.from(loadedModelsMap.current.values())
+      .map((group) => group.children[0])
+      .filter(Boolean)
+      .map(extract);
+    onNodesLoaded?.([{ id: "root", name: "Scene", type: "Scene", count: totalCount, children: rootNodes }]);
+    onStats?.(collectStats(modelsGroupRef.current));
+  }, [onNodesLoaded, onStats, modelsGroupRef]);
+
+  // Rebuilds the mixer set whenever the visible models change.
+  const syncAnimations = useCallback(() => {
+    mixersRef.current = [];
+    actionRef.current = null;
+    const clips: { name: string; duration: number }[] = [];
+
+    loadedModelsMap.current.forEach((pivot) => {
+      const model = pivot.children[0] as THREE.Object3D | undefined;
+      const animations = (model?.userData?.animations || []) as THREE.AnimationClip[];
+      if (!model || animations.length === 0) return;
+      const mixer = new THREE.AnimationMixer(model);
+      mixersRef.current.push(mixer);
+      for (const clip of animations) {
+        clips.push({ name: clip.name || `Clip ${clips.length + 1}`, duration: clip.duration });
+        (mixer as any).omniClips = animations;
+      }
+    });
+    onAnimations?.(clips);
+  }, [onAnimations]);
+
+  // Starts (or swaps) the selected clip.
   useEffect(() => {
-    if (!files || files.length === 0 || !nintendoWorker || discoveryActive.current) return;
-    
-    const discover = async () => {
+    for (const mixer of mixersRef.current) {
+      mixer.stopAllAction();
+      const clips = ((mixer as any).omniClips || []) as THREE.AnimationClip[];
+      const clip = activeClip ? clips.find((c) => c.name === activeClip) : clips[0];
+      if (!clip) continue;
+      const action = mixer.clipAction(clip);
+      action.reset().play();
+      if (!actionRef.current) actionRef.current = action;
+    }
+  }, [activeClip, discoveredModels]);
+
+  // 1. DISCOVERY — expands archives and lists every model found inside them.
+  useEffect(() => {
+    if (!files || files.length === 0) return;
+    const token = ++discoveryToken.current;
+
+    (async () => {
       try {
-        discoveryActive.current = true;
         setLoading(true);
-        const allDiscovered: InternalModel[] = [];
-        const modelExts = ['dae', 'glb', 'gltf', 'obj', 'stl', 'mdl0'];
-        const imageExts = ['png', 'jpg', 'jpeg', 'webp', 'tga', 'dds', 'bmp'];
-
+        const found: InternalModel[] = [];
         for (const file of files) {
-          const isZip = file.name.toLowerCase().endsWith('.zip');
-          const isSzs = file.name.toLowerCase().endsWith('.szs');
-
-          if (isZip || isSzs) {
-            const buffer = await file.arrayBuffer();
-            let unzipped: Record<string, Uint8Array> = {};
-
-            if (isZip) {
-              unzipped = unzipSync(new Uint8Array(buffer));
-            } else {
-              unzipped = await new Promise((resolve, reject) => {
-                 const handler = (e: MessageEvent) => {
-                    if (e.data.payload?.fileName !== file.name) return;
-                    if (e.data.type === 'EXTRACT_SUCCESS') {
-                       nintendoWorker.removeEventListener('message', handler);
-                       resolve(e.data.payload.files);
-                    } else if (e.data.type === 'EXTRACT_ERROR') {
-                       nintendoWorker.removeEventListener('message', handler);
-                       reject(new Error(e.data.payload.error));
-                    }
-                 };
-                 nintendoWorker.addEventListener('message', handler);
-                 nintendoWorker.postMessage({ type: 'EXTRACT_SZS', payload: { buffer, fileName: file.name } }, [buffer]);
-              });
-            }
-            const zipTextures: Record<string, string> = { ...providedTextures[file.name] };
-            const entries = Object.entries(unzipped);
-
-            entries.forEach(([path, data]) => {
-              if (data.length === 0) return;
-              const normalized = path.replace(/\\/g, '/');
-              const filename = normalized.split('/').pop() || normalized;
-              const ext = filename.split('.').pop()?.toLowerCase() || '';
-              if (imageExts.includes(ext)) {
-                const url = URL.createObjectURL(new Blob([data as any], { type: `image/${ext === 'jpg' ? 'jpeg' : ext}` }));
-                zipTextures[normalized] = url;
-                zipTextures[filename] = url;
-                zipTextures[path] = url;
-                zipTextures[filename.replace(/\.[^/.]+$/, "")] = url;
-              }
-            });
-
-            entries.forEach(([path, data]) => {
-              if (data.length === 0) return;
-              const ext = path.split('.').pop()?.toLowerCase() || '';
-              if (modelExts.includes(ext)) {
-                let finalData: any = data;
-                if (ext === 'dae') {
-                  try {
-                    const content = new TextDecoder().decode(data);
-                    finalData = new TextEncoder().encode(content.replace(/<init_from>\s*<ref>([\s\S]*?)<\/ref>\s*<\/init_from>/g, '<init_from>$1</init_from>'));
-                  } catch (e) { console.warn("[Viewer] DAE Pre-process failed:", e); }
-                }
-                const modelFile = new File([new Blob([finalData as any])], path.replace(/\\/g, '/'));
-                allDiscovered.push({
-                  id: Math.random().toString(36).substring(2, 9),
-                  name: path.split('/').pop() || path,
-                  file: modelFile,
-                  textures: zipTextures,
-                  sourceName: file.name,
-                  visible: allDiscovered.length === 0
-                });
-              }
-            });
-          } else {
-            const ext = file.name.split('.').pop()?.toLowerCase() || '';
-            if (modelExts.includes(ext)) {
-              allDiscovered.push({
-                id: Math.random().toString(36).substring(2, 9),
-                name: file.name,
-                file: file,
-                textures: providedTextures[file.name] || {},
-                sourceName: file.name,
-                visible: allDiscovered.length === 0
-              });
-            }
+          const models = await discoverModels(file, {
+            textures: providedTextures[file.name],
+            nintendoWorker,
+          });
+          for (const model of models) {
+            found.push({ ...model, id: `${file.name}:${model.path}`, visible: found.length === 0 });
           }
         }
 
-        if (allDiscovered.length === 0) {
+        if (token !== discoveryToken.current) {
+          new Set(found.map((m) => m.textures)).forEach(revokeTextures);
+          return;
+        }
+
+        textureMapsRef.current.forEach(revokeTextures);
+        textureMapsRef.current = Array.from(new Set(found.map((m) => m.textures)));
+
+        if (found.length === 0) {
           setError("No 3D models found.");
           setLoading(false);
         } else {
-          setDiscoveredModels(allDiscovered);
+          setDiscoveredModels(found);
           setError(null);
         }
       } catch (e) {
         console.error("[Viewer] Discovery failed:", e);
         setError("Archive Error");
         setLoading(false);
-      } finally {
-        discoveryActive.current = false;
       }
-    };
-    discover();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, nintendoWorker]);
 
-  // 2. MAIN ENGINE EFFECT
+  useEffect(() => () => { textureMapsRef.current.forEach(revokeTextures); }, []);
+
+  // 2. MODEL SYNCHRONISER — mounts/unmounts models as the catalog changes.
   useEffect(() => {
-    if (!containerRef.current || discoveredModels.length === 0) return;
-    
-    const container = containerRef.current;
-    const scene = new THREE.Scene();
-    sceneRef.current = scene;
-    scene.background = new THREE.Color(backgroundColor);
-    updateGrid(scene, backgroundColor);
-    
-    const camera = new THREE.PerspectiveCamera(45, container.clientWidth/container.clientHeight, 0.1, 50000);
-    camera.position.set(25,25,25);
-    cameraRef.current = camera;
+    if (!sceneRef.current || discoveredModels.length === 0) return;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
-    rendererRef.current = renderer;
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    container.appendChild(renderer.domElement);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 2.0));
-    const dl = new THREE.DirectionalLight(0xffffff, 2.0);
-    dl.position.set(10, 50, 10);
-    scene.add(dl);
-
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controlsRef.current = controls;
-
-    scene.add(modelsGroupRef.current);
-
-    let anim: number;
-    const loop = () => { anim = requestAnimationFrame(loop); if (controlsRef.current) controlsRef.current.update(); if (rendererRef.current && sceneRef.current && cameraRef.current) rendererRef.current.render(sceneRef.current, cameraRef.current); };
-    loop();
-
-    const ro = new ResizeObserver((es) => {
-      if (!es.length || !rendererRef.current || !cameraRef.current || !containerRef.current) return;
-      const { width: w, height: h } = es[0].contentRect;
-      camera.aspect = w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h,false);
-    });
-    ro.observe(container);
-
-    return () => {
-      ro.disconnect();
-      cancelAnimationFrame(anim);
-      if (rendererRef.current) {
-         rendererRef.current.dispose();
-         if (container.contains(rendererRef.current.domElement)) container.removeChild(rendererRef.current.domElement);
-      }
-    };
-  }, [backgroundColor, discoveredModels.length]);
-
-  // 3. MODEL SYNCHRONIZER
-  useEffect(() => {
-    if (!sceneRef.current) return;
-    
-    const visibleModels = discoveredModels.filter(m => m.visible);
-    
+    const knownIds = new Set(discoveredModels.map((m) => m.id));
+    const visibleIds = new Set(discoveredModels.filter((m) => m.visible).map((m) => m.id));
     loadedModelsMap.current.forEach((group, id) => {
-      if (!visibleModels.find(m => m.id === id)) {
+      if (!knownIds.has(id)) {
+        modelsGroupRef.current.remove(group);
+        disposeObject(group);
+        loadedModelsMap.current.delete(id);
+      } else if (!visibleIds.has(id)) {
         modelsGroupRef.current.remove(group);
       }
     });
 
-    visibleModels.forEach(modelInfo => {
-      if (loadedModelsMap.current.has(modelInfo.id)) {
-        modelsGroupRef.current.add(loadedModelsMap.current.get(modelInfo.id)!);
-        setLoading(false);
-        return;
-      }
+    let cancelled = false;
+    (async () => {
+      for (const modelInfo of discoveredModels) {
+        if (cancelled) return;
+        if (!modelInfo.visible) continue;
 
-      setLoading(true);
-      const manager = new THREE.LoadingManager();
-      const textureLoader = new THREE.TextureLoader(manager);
-      const activeTextures = modelInfo.textures;
-
-      manager.setURLModifier((url) => {
-        if (url.startsWith('data:')) return url;
-        let searchUrl = url;
-        if (url.startsWith('blob:')) {
-           if (/\.(png|jpg|jpeg|webp|tga|dds|bmp)$/i.test(url)) {
-              searchUrl = url.split('/').pop()?.split('?')[0] || url;
-           } else return url;
-        }
-        const fileName = searchUrl.split('/').pop()?.split('?')[0] || '';
-        const baseName = fileName.replace(/\.[^/.]+$/, "");
-        const decodedFileName = decodeURIComponent(fileName);
-        const decodedBaseName = decodeURIComponent(baseName);
-        let normalized = searchUrl.replace(/\\/g, '/').replace(/^\.\//, '');
-        
-        // SURGICAL: Prefer _fix textures for eyes to resolve Cyclops issue
-        if (fileName.toLowerCase().includes('eye') || decodedFileName.toLowerCase().includes('eye')) {
-           const fixBase = baseName + "_fix";
-           const dFixBase = decodedBaseName + "_fix";
-           const fixMatch = Object.keys(activeTextures).find(k => {
-              const kFile = k.split('/').pop()?.replace(/\.[^/.]+$/, "").toLowerCase() || "";
-              return kFile === fixBase.toLowerCase() || kFile === dFixBase.toLowerCase();
-           });
-           if (fixMatch) return activeTextures[fixMatch];
+        const cached = loadedModelsMap.current.get(modelInfo.id);
+        if (cached) {
+          modelsGroupRef.current.add(cached);
+          continue;
         }
 
-        if (activeTextures[normalized]) return activeTextures[normalized];
-        if (activeTextures[decodeURIComponent(normalized)]) return activeTextures[decodeURIComponent(normalized)];
-        if (activeTextures[fileName]) return activeTextures[fileName];
-        if (activeTextures[decodedFileName]) return activeTextures[decodedFileName];
-        if (activeTextures[baseName]) return activeTextures[baseName];
-        if (activeTextures[decodedBaseName]) return activeTextures[decodedBaseName];
-        if (modelInfo.file.name.includes('/')) {
-          const modelDir = modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/'));
-          const fullRel = `${modelDir}/${normalized}`;
-          if (activeTextures[fullRel]) return activeTextures[fullRel];
-          const fileRel = `${modelDir}/${fileName}`;
-          if (activeTextures[fileRel]) return activeTextures[fileRel];
-        }
-        const anyMatch = Object.keys(activeTextures).find(k => k.endsWith('/' + fileName) || k === fileName || k.endsWith('/' + decodedFileName) || k === decodedFileName);
-        if (anyMatch) return activeTextures[anyMatch];
-        return url;
-      });
-
-      const onLoad = (object: any) => {
-        const model = object.scene || object;
-        
-        // PERFORMANCE OPTIMIZATION: Prepare data outside the traversal
-        const sortedTextureKeys = Object.keys(activeTextures).sort((a, b) => b.length - a.length);
-        const semanticTags = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth", "face", "mouth", "tire", "wheel", "all", "body"];
-
-        const applyMaterialFixes = () => {
-          model.traverse((child: any) => {
-            if (child.isMesh) {
-              const mats = Array.isArray(child.material) ? child.material : [child.material];
-              mats.forEach((mat: any) => {
-                 if (!mat) return;
-                 const matName = String(mat.name || "").toLowerCase();
-                 const meshName = String(child.name || "").toLowerCase();
-                 const wiiTexName = String(mat.userData.wiiTextureName || "").toLowerCase();
-
-                 // 1. UNIVERSAL WEIGHTED MATCHER (Optimized)
-                 if (!mat.map) {
-                    let bestKey = "";
-                    let bestScore = -1;
-                    const wiiTextures = (mat.userData.wiiTextures || []) as string[];
-
-                    for (const key of sortedTextureKeys) {
-                       const texFileName = key.toLowerCase().split('/').pop() || "";
-                       const texBaseName = texFileName.replace(/\.[^/.]+$/, "");
-                       let score = 0;
-
-                       // NINTENDO PRIORITY: Exact match on any of the material's texture slots
-                       if (wiiTexName && (texBaseName === wiiTexName || texFileName === wiiTexName)) {
-                          score += 5000;
-                       }
-                       for (const wTex of wiiTextures) {
-                          const wTexLower = wTex.toLowerCase();
-                          if (texBaseName === wTexLower || texFileName === wTexLower) {
-                             score += 4500; // Slightly lower than primary slot but still very high
-                             break;
-                          }
-                       }
-
-                       if (texBaseName === matName) score += 1000;
-                       if (matName.includes(texBaseName)) score += 500;
-                       if (texBaseName.includes(matName)) score += 400;
-
-                       for (const tag of semanticTags) {
-                          const hasMatTag = matName.includes(tag) || meshName.includes(tag);
-                          const hasTexTag = texBaseName.includes(tag);
-                          if (hasMatTag && hasTexTag) score += 300;
-                          if (!hasMatTag && hasTexTag) score -= 800; 
-                       }
-
-                       if (score > bestScore) {
-                          bestScore = score;
-                          bestKey = key;
-                       }
-                    }
-
-                    if (bestKey && bestScore > 0) {
-                       mat.map = textureLoader.load(activeTextures[bestKey]);
-                    }
-                 }
-
-                 // 2. UNIVERSAL MATERIAL HEURISTICS
-                 if (mat.map) {
-                    mat.color.set(0xffffff);
-                    mat.opacity = 1.0;
-                    if (mat.emissive) mat.emissive.set(0x000000);
-                    if (mat.specular) mat.specular.set(0x000000);
-                    
-                    const lowerMat = matName.toLowerCase();
-                    const lowerMesh = meshName.toLowerCase();
-                    
-                    // Generic Semantic Layers + Surgical Targeting (polygon0/polygon1)
-                    const isEye = lowerMesh === "polygon1" || lowerMat.includes("eye") || lowerMesh.includes("eye");
-                    const isMouth = lowerMat.includes("mouth") || lowerMesh.includes("mouth") || lowerMat.includes("lm_");
-                    const isMustache = lowerMat.includes("mustache") || lowerMesh.includes("mustache");
-                    const isOverlay = isEye || isMouth || isMustache || lowerMat.includes("alpha") || lowerMat.includes("overlay");
-
-                    if (isOverlay) {
-                       mat.transparent = true;
-                       mat.vertexColors = false; 
-                       mat.alphaTest = 0.5; 
-                       mat.polygonOffset = true;
-                       mat.polygonOffsetFactor = -2;
-                       mat.polygonOffsetUnits = -8;
-                       child.renderOrder = isEye ? 50 : (isMouth ? 10 : 20);
-                    } else {
-                       mat.transparent = false; 
-                       mat.vertexColors = false; 
-                       mat.alphaTest = 0; 
-                       child.renderOrder = 0;
-                    }
-
-                    mat.side = THREE.DoubleSide;
-                    mat.depthWrite = !isOverlay;
-                    mat.depthTest = true;
-                    
-                    // NINTENDO WRAP MODES
-                    if (mat.userData.wrapS !== undefined) {
-                        mat.map.wrapS = mat.userData.wrapS;
-                        mat.map.wrapT = mat.userData.wrapT;
-                    } else {
-                        mat.map.wrapS = mat.map.wrapT = isEye ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
-                    }
-                    
-                    mat.map.flipY = false; // UVs are already flipped in wii-parser.ts (1.0 - V)
-                    mat.map.colorSpace = THREE.SRGBColorSpace;
-                    mat.map.minFilter = mat.map.magFilter = THREE.LinearFilter;
-                    mat.map.needsUpdate = true;
-                    mat.needsUpdate = true;
-                 }
-              });
-            }
-          });
+        setLoading(true);
+        let loaded: THREE.Object3D | null = null;
+        const manager = new THREE.LoadingManager();
+        manager.setURLModifier(createTextureResolver(modelInfo.textures, modelInfo.path));
+        const textureLoader = new THREE.TextureLoader(manager);
+        // Re-run the material pass once every queued texture has settled.
+        manager.onLoad = () => {
+          if (!loaded) return;
+          applyMaterialFixes(loaded, modelInfo.textures, textureLoader);
+          applyDisplayMode(modelsGroupRef.current, displayMode, unlitRef.current);
         };
-        applyMaterialFixes();
-        
-        const pivot = new THREE.Group();
-        pivot.add(model);
-        
-        const box = new THREE.Box3().setFromObject(model);
-        const center = new THREE.Vector3(); box.getCenter(center);
-        const size = new THREE.Vector3(); box.getSize(size);
-        model.position.set(-center.x, -center.y, -center.z);
-        const maxDim = Math.max(size.x, size.y, size.z);
-        if (maxDim > 0) pivot.scale.setScalar(12 / maxDim);
-        
-        loadedModelsMap.current.set(modelInfo.id, pivot);
-        modelsGroupRef.current.add(pivot);
-        applyVisibility();
-        setTimeout(applyMaterialFixes, 300);
-        updateNodeTree();
-        setLoading(false);
-      };
 
-      const loadModel = async () => {
-        const url = URL.createObjectURL(modelInfo.file);
-        const ext = modelInfo.file.name.split('.').pop()?.toLowerCase();
-
-        // Read first 4 bytes to check for GLB magic 'glTF' (0x676c5446)
-        let isDisguisedGLB = false;
         try {
-          const slice = modelInfo.file.slice(0, 4);
-          const buffer = await slice.arrayBuffer();
-          const view = new DataView(buffer);
-          if (view.byteLength >= 4) {
-            const magic = view.getUint32(0, false); // big-endian
-            isDisguisedGLB = magic === 0x676C5446;
+          const object = await loadModelObject(modelInfo.file, manager, nintendoWorker);
+          if (cancelled) {
+            disposeObject(object);
+            return;
           }
+          loaded = object;
+          applyMaterialFixes(object, modelInfo.textures, textureLoader);
+
+          const pivot = new THREE.Group();
+          pivot.add(object);
+
+          const box = new THREE.Box3().setFromObject(object);
+          const center = new THREE.Vector3();
+          const size = new THREE.Vector3();
+          box.getCenter(center);
+          box.getSize(size);
+          object.position.set(-center.x, -center.y, -center.z);
+          const maxDim = Math.max(size.x, size.y, size.z);
+          if (maxDim > 0) pivot.scale.setScalar(12 / maxDim);
+
+          loadedModelsMap.current.set(modelInfo.id, pivot);
+          modelsGroupRef.current.add(pivot);
+          applyVisibility();
         } catch (e) {
-          console.warn("Could not check magic bytes of file:", e);
+          console.error(`[Viewer] Failed to load ${modelInfo.name}:`, e);
+        } finally {
+          if (!cancelled) setLoading(false);
         }
+      }
+      if (!cancelled) {
+        applyVisibility();
+        onConsoleModel?.(isConsoleModel(modelsGroupRef.current));
+        applyDisplayMode(modelsGroupRef.current, displayMode, unlitRef.current);
+        syncAnimations();
+        updateNodeTree();
+      }
+    })();
 
-        if (isDisguisedGLB || ext === 'glb' || ext === 'gltf') {
-          new GLTFLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
-        } else if (ext === 'fbx') {
-          const loader = new FBXLoader(manager);
-          loader.load(url, (fbx) => onLoad(fbx), undefined, () => setLoading(false));
-        } else if (ext === 'dae') {
-          const loader = new ColladaLoader(manager);
-          if (modelInfo.file.name.includes('/')) loader.setResourcePath(modelInfo.file.name.substring(0, modelInfo.file.name.lastIndexOf('/') + 1));
-          loader.load(url, (c) => c ? onLoad(c.scene) : null, undefined, () => setLoading(false));
-        } else if (ext === 'mdl0') {
-          const loader = new WiiLoader(manager, nintendoWorker);
-          loader.load(url, (m) => onLoad(m), undefined, () => setLoading(false));
-        } else if (ext === 'obj') {
-          new OBJLoader(manager).load(url, onLoad, undefined, () => setLoading(false));
-        } else if (ext === 'stl') {
-          new STLLoader(manager).load(url, (g) => onLoad(new THREE.Mesh(g, new THREE.MeshPhongMaterial())), undefined, () => setLoading(false));
-        } else {
-          setLoading(false);
-        }
-      };
-
-      loadModel();
-    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [discoveredModels]);
-
-  const updateNodeTree = () => {
-    if (!onNodesLoaded) return;
-    let totalCount = 0;
-    const extract = (obj: THREE.Object3D): SceneNode => {
-      totalCount++;
-      return { id: obj.uuid, name: obj.name || obj.type, type: obj.type, children: obj.children.map(extract) };
-    };
-    const rootNodes = Array.from(loadedModelsMap.current.values()).map(group => extract(group.children[0]));
-    const virtualRoot: SceneNode = { id: 'root', name: 'Scene', type: 'Scene', count: totalCount, children: rootNodes };
-    onNodesLoaded([virtualRoot]);
-  };
 
   const toggleModelVisibility = (id: string) => {
     setDiscoveredModels(prev => prev.map(m => m.id === id ? { ...m, visible: !m.visible } : m));

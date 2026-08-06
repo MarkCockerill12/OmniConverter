@@ -1,10 +1,8 @@
 import { decompressYaz0 } from "./decompressors";
-import { decodeTEX0, createBMP } from "./tex0-decoders";
 
-export function parseU8(data: Uint8Array): Record<string, Uint8Array> {
+function parseU8(data: Uint8Array): Record<string, Uint8Array> {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   if (data.length < 0x20 || view.getUint32(0) !== 0x55AA382D) return {};
-  const nodesCount = view.getUint32(12);
   const rootNodeOffset = view.getUint32(4);
   const nodes = view.getUint32(rootNodeOffset + 8);
   const stringTableOffset = rootNodeOffset + (nodes * 12);
@@ -31,7 +29,7 @@ export function parseU8(data: Uint8Array): Record<string, Uint8Array> {
   return files;
 }
 
-export function parseBRRES(data: Uint8Array): Record<string, Uint8Array> {
+function parseBRRES(data: Uint8Array): Record<string, Uint8Array> {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     if (data.length < 16 || view.getUint32(0) !== 0x62726573) return {};
     const files: Record<string, Uint8Array> = {};
@@ -77,7 +75,13 @@ export function parseBRRES(data: Uint8Array): Record<string, Uint8Array> {
                     const size = view.getUint32(fileOff + 4, false);
                     if (size > 8 && fileOff + size <= data.length) {
                         const ext = magic === 0x4D444C30 ? ".mdl0" : (magic === 0x54455830 ? ".tex0" : ".bin");
-                        files[`${catName}/${fileName}${ext}`] = data.slice(fileOff, fileOff + size);
+                        // MDL0 name offsets are relative to the MDL0 block but point
+                        // into the BRRES-wide string pool, which lives *after* the
+                        // block. Slicing to the declared size would cut every name
+                        // off, so models keep the tail of the container.
+                        files[`${catName}/${fileName}${ext}`] = magic === 0x4D444C30
+                            ? data.slice(fileOff)
+                            : data.slice(fileOff, fileOff + size);
                     }
                 });
             });

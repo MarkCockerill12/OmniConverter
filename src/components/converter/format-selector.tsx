@@ -4,64 +4,31 @@ import { useState, useRef, useMemo, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, ChevronDown, CheckCircle2, CircleDashed } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { allowedTargets, type Category } from "@/lib/formats";
 
-export type Category = "Image" | "3D Model" | "Document" | "Video" | "Audio" | "Archive" | "Unrecognized";
-
-export const FORMAT_CATEGORIES: Record<Category, string[]> = {
-  "Image": ["PNG", "JPG", "JPEG", "WEBP", "GIF", "TIFF", "BMP", "SVG"],
-  "3D Model": ["GLB", "GLTF", "OBJ", "STL", "FBX", "DAE", "3MF", "PLY", "SZS", "MDL0"],
-  "Document": ["PDF", "DOCX", "DOC", "TXT", "RTF", "MD"],
-  "Video": ["MP4", "WEBM", "MKV", "MOV", "AVI"],
-  "Audio": ["MP3", "WAV", "FLAC", "OGG", "M4A"],
-  "Archive": ["ZIP", "RAR", "7Z", "TAR", "GZ"],
-  "Unrecognized": []
-};
-
-// Conversion Restriction Map: Source Category -> Allowed Target Categories
-const ALLOWED_CONVERSIONS: Record<Category, Category[]> = {
-  "Image": ["Image"],
-  "Video": ["Video", "Audio"],
-  "Audio": ["Audio"],
-  "3D Model": ["3D Model"],
-  "Document": ["Document"],
-  "Archive": ["Archive", "3D Model"],
-  "Unrecognized": []
-};
-
-export function getFileCategory(fileName: string): Category {
-  const ext = fileName.split('.').pop()?.toUpperCase() || "";
-  for (const [cat, exts] of Object.entries(FORMAT_CATEGORIES)) {
-    if (exts.includes(ext)) return cat as Category;
-  }
-  return "Unrecognized";
-}
-
-export function FormatDropdown({ 
-  value, 
-  onChange, 
+export function FormatDropdown({
+  value,
+  onChange,
   sourceFileName = "",
-  label = "Select Format" 
-}: { 
-  value: string; 
+  label = "Select Format"
+}: {
+  value: string;
   onChange: (val: string) => void;
   sourceFileName?: string;
   label?: string;
 }) {
+  const targets = useMemo(() => allowedTargets(sourceFileName), [sourceFileName]);
+  const categories = useMemo(() => Object.keys(targets) as Category[], [targets]);
+
   const [isOpen, setIsOpen] = useState(false);
-  const [activeCategory, setActiveCategory] = useState<Category>("Image");
+  // Default to the source's own category (a video opens on "Video", not "Image").
+  const [activeCategory, setActiveCategory] = useState<Category>(categories[0] ?? "Image");
   const [search, setSearch] = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const sourceCategory = useMemo(() => getFileCategory(sourceFileName), [sourceFileName]);
-  const allowedCategories = useMemo(() => {
-    return ALLOWED_CONVERSIONS[sourceCategory] || ["Image"];
-  }, [sourceCategory]);
-
   useEffect(() => {
-    if (!allowedCategories.includes(activeCategory)) {
-      setActiveCategory(allowedCategories[0]);
-    }
-  }, [allowedCategories, activeCategory]);
+    setActiveCategory(categories[0] ?? "Image");
+  }, [categories]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -74,17 +41,14 @@ export function FormatDropdown({
   }, []);
 
   const filteredFormats = useMemo(() => {
-    let formats = FORMAT_CATEGORIES[activeCategory] || [];
-    if (activeCategory === "3D Model") {
-      formats = ["GLB", "GLTF", "OBJ", "STL"];
-    }
+    const formats = targets[activeCategory] || [];
     if (!search) return formats;
     return formats.filter(f => f.toLowerCase().includes(search.toLowerCase()));
-  }, [activeCategory, search]);
+  }, [targets, activeCategory, search]);
 
   return (
     <div className="relative" ref={dropdownRef}>
-      <button 
+      <button
         onClick={() => setIsOpen(!isOpen)}
         className={cn(
           "flex items-center gap-2 px-4 py-2 bg-[#e11d48] hover:bg-[#be123c] text-white rounded-md font-bold transition-all h-10 min-w-[120px] shadow-lg shadow-[#e11d48]/10",
@@ -97,7 +61,7 @@ export function FormatDropdown({
 
       <AnimatePresence>
         {isOpen && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -105,7 +69,7 @@ export function FormatDropdown({
           >
             {/* Sidebar Categories */}
             <div className="w-1/3 border-r border-neutral-100 bg-neutral-50 py-2">
-              {allowedCategories.map(cat => (
+              {categories.map(cat => (
                 <button
                   key={cat}
                   onClick={() => setActiveCategory(cat)}
@@ -123,8 +87,8 @@ export function FormatDropdown({
             <div className="w-2/3 p-4 bg-white">
               <div className="relative mb-4">
                 <Search className="absolute left-3 top-2.5 w-4 h-4 text-neutral-400" />
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   placeholder="Search Format"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -143,8 +107,8 @@ export function FormatDropdown({
                       }}
                       className={cn(
                         "px-2 py-2 text-xs font-bold rounded border transition-all text-center uppercase tracking-tighter",
-                        value === fmt 
-                          ? "bg-[#e11d48] text-white border-[#e11d48]" 
+                        value === fmt
+                          ? "bg-[#e11d48] text-white border-[#e11d48]"
                           : "bg-neutral-800 text-white border-neutral-700 hover:bg-[#e11d48] hover:border-[#e11d48]"
                       )}
                     >
@@ -167,8 +131,8 @@ export function StatusBadge({ label, ready }: { label: string; ready: boolean })
   return (
     <div className={cn(
       "flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border transition-all duration-500",
-      ready 
-        ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" 
+      ready
+        ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
         : "bg-white/5 text-neutral-500 border-white/5"
     )}>
       {ready ? <CheckCircle2 className="w-3 h-3" /> : <CircleDashed className="w-3 h-3 animate-spin" />}
