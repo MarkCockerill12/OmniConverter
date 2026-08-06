@@ -1,4 +1,4 @@
-import { extractSZS, parseMDL0, decodeTEX0, createBMP } from "@/lib/nintendo/wii-parser";
+import { extractSZS, parseMDL0, decodeTEX0, createPNG } from "@/lib/nintendo/wii-parser";
 
 /**
  * Nintendo Format Worker
@@ -22,13 +22,13 @@ self.onmessage = async (e: MessageEvent) => {
               try {
                   const result = decodeTEX0(data);
                   if (result) {
-                      const bmp = createBMP(result.rgba, result.width, result.height);
-                      decodedFiles[name.replace('.tex0', '.bmp')] = bmp;
-                      transferables.push(bmp.buffer as ArrayBuffer);
+                      const png = createPNG(result.rgba, result.width, result.height);
+                      decodedFiles[name.replace('.tex0', '.png')] = png;
+                      transferables.push(png.buffer as ArrayBuffer);
                       return;
                   }
-              } catch (e) {
-                  console.warn(`[Worker] Failed to decode TEX0: ${name}`, e);
+              } catch (decodeError) {
+                  console.warn(`[Worker] Failed to decode TEX0: ${name}`, decodeError);
               }
           }
           decodedFiles[name] = data;

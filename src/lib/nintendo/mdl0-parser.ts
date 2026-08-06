@@ -30,20 +30,36 @@ export function parseMDL0(buffer: ArrayBuffer, name: string = "model"): MDL0Mode
     const numOffsets = version >= 10 ? 15 : 11;
     for (let i = 0; i < numOffsets; i++) offsets.push(view.getInt32(0x10 + (i * 4), false));
 
+    /** Reads one printable ASCII run; returns "" when the bytes are not a name. */
+    const readAscii = (p: number) => {
+        if (p < 0 || p >= u8.length || u8[p] === 0) return "";
+        let text = "";
+        let curr = p;
+        while (curr < u8.length && u8[curr] !== 0 && text.length < 128) {
+            const c = u8[curr++];
+            if (c < 32 || c > 126) return "";
+            text += String.fromCharCode(c);
+        }
+        return text;
+    };
+
+    /**
+     * BRRES string-pool entries are length-prefixed (`int length; chars; 0`).
+     * Comparing that prefix against the run we read tells us the base was right,
+     * which matters because a wrong base can still land on a *neighbouring*
+     * valid name (e.g. reading "NodeTree" where "polygon0" was meant).
+     */
     const getString = (off: number, ...bases: number[]) => {
         if (off <= 0) return "";
         for (const base of bases) {
-            let p = base + off;
-            if (p < 0 || p >= u8.length || u8[p] === 0) continue;
-            let name = "";
-            let curr = p;
-            let isJunk = false;
-            while (curr < u8.length && u8[curr] !== 0 && name.length < 128) {
-                const c = u8[curr++];
-                if (c < 32 || c > 126) { isJunk = true; break; }
-                name += String.fromCharCode(c);
-            }
-            if (!isJunk && name.length > 0) return name;
+            const p = base + off;
+            const text = readAscii(p);
+            if (text && p >= 4 && view.getUint32(p - 4, false) === text.length) return text;
+        }
+        // Older/odd files without a usable prefix: accept the first plausible run.
+        for (const base of bases) {
+            const text = readAscii(base + off);
+            if (text) return text;
         }
         return "";
     };
@@ -60,15 +76,41 @@ export function parseMDL0(buffer: ArrayBuffer, name: string = "model"): MDL0Mode
             const strOff = view.getInt32(entryOff + 8, false);
             const dataOff = view.getInt32(entryOff + 12, false);
             
-            // MDL0 strings can be relative to the IndexGroup or Absolute
-            const resName = getString(strOff, 0, groupOff, entryOff);
+            // Entry string offsets are relative to the resource group; the other
+            // bases are only fallbacks for non-standard writers.
+            const resName = getString(strOff, groupOff, entryOff, 0);
             map.push({ name: resName || `obj_${i}`, offset: groupOff + dataOff });
         }
         return map;
     };
 
-    const matIdxGroup = version >= 10 ? 8 : 6;
-    const polyIdxGroup = version >= 10 ? 10 : 8;
+    /**
+     * Every MDL0 sub-block starts with `size(s32); mdl0Offset(s32)`, where the
+     * second field points *backwards* to the model header. Counting entries that
+     * satisfy that lets us confirm which section index really holds materials
+     * and objects instead of trusting the version number alone — the layout
+     * shifted between revisions and a wrong guess yields a silently empty model.
+     */
+    const plausibleBlocks = (list: { offset: number }[]) => list.filter((e) => {
+        if (e.offset <= 0 || e.offset + 8 > buffer.byteLength) return false;
+        const len = view.getInt32(e.offset, false);
+        const mdl0Off = view.getInt32(e.offset + 4, false);
+        return len > 0 && e.offset + len <= buffer.byteLength && mdl0Off <= 0;
+    }).length;
+
+    // v10/v11 insert the fur sections, pushing materials/objects to 8/10.
+    const sectionCandidates: [number, number][] = version >= 10 ? [[8, 10], [6, 8]] : [[6, 8], [8, 10]];
+    let matIdxGroup = sectionCandidates[0][0];
+    let polyIdxGroup = sectionCandidates[0][1];
+    let bestScore = -1;
+    for (const [materials, objects] of sectionCandidates) {
+        const score = plausibleBlocks(getResourceMap(materials)) + plausibleBlocks(getResourceMap(objects));
+        if (score > bestScore) {
+            bestScore = score;
+            matIdxGroup = materials;
+            polyIdxGroup = objects;
+        }
+    }
 
     const vtxList = getResourceMap(2);
     const nrmList = getResourceMap(3);
@@ -181,8 +223,8 @@ export function parseMDL0(buffer: ArrayBuffer, name: string = "model"): MDL0Mode
         
         const posOff = dlStride; dlStride += getFmtSize(posFmt);
         const nrmOff = dlStride; dlStride += getFmtSize(nrmFmt);
-        const col0Off = dlStride; dlStride += getFmtSize(col0Fmt);
-        const col1Off = dlStride; dlStride += getFmtSize(col1Fmt);
+        dlStride += getFmtSize(col0Fmt); // colour slots are skipped, but still consume stride
+        dlStride += getFmtSize(col1Fmt);
         const uv0Off = dlStride; dlStride += getFmtSize(uv0Fmt);
 
         if (dlStride === 0) return;
@@ -239,12 +281,15 @@ export function parseMDL0(buffer: ArrayBuffer, name: string = "model"): MDL0Mode
                     const uIdx = uv0Fmt === 3 ? view.getUint16(p + uv0Off, false) : (uv0Fmt === 2 ? u8[p + uv0Off] : -1);
                     if (uIdx >= 0 && uIdx < uvGrp.count) {
                         const b = uvGrp.offset + uIdx * uvGrp.stride, d = uvGrp.divisor;
+                        // GameCube UVs already use a top-left origin, which is
+                        // exactly what `texture.flipY = false` expects. Flipping V
+                        // here as well mirrors the model in texture space.
                         if (b + (uvGrp.type === 4 ? 8 : 4) <= buffer.byteLength) {
-                            if (uvGrp.type === 4) { tempUVs[(vPtr/3)*2]=view.getFloat32(b,false); tempUVs[(vPtr/3)*2+1]=1.0-view.getFloat32(b+4,false); }
-                            else if (uvGrp.type === 3) { tempUVs[(vPtr/3)*2]=view.getInt16(b,false)/d; tempUVs[(vPtr/3)*2+1]=1.0-view.getInt16(b+2,false)/d; }
-                            else if (uvGrp.type === 2) { tempUVs[(vPtr/3)*2]=view.getUint16(b,false)/d; tempUVs[(vPtr/3)*2+1]=1.0-view.getUint16(b+2,false)/d; }
-                            else if (uvGrp.type === 1) { tempUVs[(vPtr/3)*2]=view.getInt8(b)/d; tempUVs[(vPtr/3)*2+1]=1.0-view.getInt8(b+1)/d; }
-                            else { tempUVs[(vPtr/3)*2]=u8[b]/d; tempUVs[(vPtr/3)*2+1]=1.0-u8[b+1]/d; }
+                            if (uvGrp.type === 4) { tempUVs[(vPtr/3)*2]=view.getFloat32(b,false); tempUVs[(vPtr/3)*2+1]=view.getFloat32(b+4,false); }
+                            else if (uvGrp.type === 3) { tempUVs[(vPtr/3)*2]=view.getInt16(b,false)/d; tempUVs[(vPtr/3)*2+1]=view.getInt16(b+2,false)/d; }
+                            else if (uvGrp.type === 2) { tempUVs[(vPtr/3)*2]=view.getUint16(b,false)/d; tempUVs[(vPtr/3)*2+1]=view.getUint16(b+2,false)/d; }
+                            else if (uvGrp.type === 1) { tempUVs[(vPtr/3)*2]=view.getInt8(b)/d; tempUVs[(vPtr/3)*2+1]=view.getInt8(b+1)/d; }
+                            else { tempUVs[(vPtr/3)*2]=u8[b]/d; tempUVs[(vPtr/3)*2+1]=u8[b+1]/d; }
                         }
                     }
                 }

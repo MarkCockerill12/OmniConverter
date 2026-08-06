@@ -2,48 +2,27 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { 
-  X, 
-  Crop as CropIcon, 
-  Scissors, 
-  Monitor, 
-  CloudRain, 
-  Volume2, 
-  Check, 
-  Play, 
-  Pause,
-  ChevronRight,
-  MousePointer2,
-  Maximize2,
-  Palette,
-  Droplets
-} from "lucide-react";
+import { X, Crop as CropIcon, Scissors, Volume2, Check, Play, Pause } from "lucide-react";
+import { EditorControls } from "./editor-controls";
 import { cn } from "@/lib/utils";
+import type { EditOptions, Preset } from "@/lib/formats";
 import Cropper, { Area } from "react-easy-crop";
 
-interface EditOptions {
-  trimStart?: number;
-  trimEnd?: number;
-  crop?: { x: number; y: number; width: number; height: number };
-  resolution?: string;
-  transparencyColor?: string;
-  transparencySimilarity?: number;
-  transparencyBlend?: number;
-  audioBitrate?: string;
-  frameTimestamp?: number;
-}
+export type EditorType = 'image' | 'video' | 'audio' | 'video-to-image';
 
 interface MediaEditorModalProps {
   isOpen: boolean;
   onClose: () => void;
   file: File;
-  type: 'image' | 'video' | 'audio' | 'video-to-image';
+  type: EditorType;
+  targetFormat?: string;
   initialOptions?: EditOptions;
-  onSave: (options: EditOptions) => void;
+  onSave: (options: EditOptions, targetFormat?: string) => void;
 }
 
-export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, onSave }: MediaEditorModalProps) {
+export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "", initialOptions, onSave }: MediaEditorModalProps) {
   const [options, setOptions] = useState<EditOptions>(initialOptions || {});
+  const [target, setTarget] = useState(targetFormat);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -97,8 +76,14 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
   }, []);
 
   const handleSave = () => {
-    onSave(options);
+    onSave(options, target !== targetFormat ? target : undefined);
     onClose();
+  };
+
+  // Presets set both the encoder options and the output format in one click.
+  const applyPreset = (preset: Preset) => {
+    setOptions((prev) => ({ ...prev, ...preset.options }));
+    setTarget(preset.target);
   };
 
   return (
@@ -287,229 +272,24 @@ export function MediaEditorModal({ isOpen, onClose, file, type, initialOptions, 
                 )}
               </div>
 
-              {/* Controls Sidebar */}
-              <div className="flex-1 border-l border-white/5 p-8 space-y-10 min-w-[380px] bg-[#1a1d23]">
-                {type === 'image' && (
-                  <>
-                    <EditorSection title="Transparency Engine" icon={<Droplets className="w-4 h-4" />}>
-                      <div className="space-y-6">
-                         <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                               <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">Color to Remove</label>
-                               {options.transparencyColor && (
-                                  <button 
-                                     onClick={() => setOptions({ ...options, transparencyColor: undefined })}
-                                     className="text-[8px] font-black text-[#e11d48] uppercase hover:underline"
-                                  >
-                                     Reset
-                                  </button>
-                               )}
-                            </div>
-                            <div className="flex items-center gap-3">
-                               <div className="relative">
-                                  <input 
-                                    type="color" 
-                                    className="w-12 h-12 rounded-xl bg-transparent border-none cursor-pointer outline-none"
-                                    value={options.transparencyColor || "#000000"}
-                                    onChange={(e) => setOptions({ ...options, transparencyColor: e.target.value })}
-                                  />
-                                  {!options.transparencyColor && (
-                                     <div className="absolute inset-0 bg-[#1f2228] border border-white/10 rounded-xl flex items-center justify-center pointer-events-none">
-                                        <Palette className="w-5 h-5 text-neutral-600" />
-                                     </div>
-                                  )}
-                               </div>
-                               <input 
-                                 type="text" 
-                                 placeholder="HEX (e.g. #FFFFFF)"
-                                 className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors uppercase"
-                                 value={options.transparencyColor || ""}
-                                 onChange={(e) => setOptions({ ...options, transparencyColor: e.target.value })}
-                               />
-                            </div>
-                         </div>
-
-                         <div className="space-y-4">
-                            <div className="flex items-center justify-between">
-                               <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">Color Similarity</label>
-                               <span className="text-[10px] font-mono font-black text-[#e11d48]">{Math.round((options.transparencySimilarity || 0.1) * 100)}%</span>
-                            </div>
-                            <input 
-                               type="range" 
-                               min="0.01" 
-                               max="1.0" 
-                               step="0.01"
-                               className="w-full accent-[#e11d48]"
-                               value={options.transparencySimilarity || 0.1}
-                               onChange={(e) => setOptions({ ...options, transparencySimilarity: parseFloat(e.target.value) })}
-                            />
-                            <p className="text-[9px] text-neutral-500 font-medium italic">Higher values remove more colors similar to the target.</p>
-                         </div>
-
-                         <div className="space-y-4">
-                            <div className="flex items-center justify-between">
-                               <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">Edge Blend</label>
-                               <span className="text-[10px] font-mono font-black text-[#e11d48]">{Math.round((options.transparencyBlend || 0.1) * 100)}%</span>
-                            </div>
-                            <input 
-                               type="range" 
-                               min="0.0" 
-                               max="1.0" 
-                               step="0.01"
-                               className="w-full accent-[#e11d48]"
-                               value={options.transparencyBlend || 0.1}
-                               onChange={(e) => setOptions({ ...options, transparencyBlend: parseFloat(e.target.value) })}
-                            />
-                         </div>
-                      </div>
-                    </EditorSection>
-
-                    <EditorSection title="Visual Cropper" icon={<CropIcon className="w-4 h-4" />}>
-                       <div className="space-y-4">
-                          <button 
-                             onClick={() => setIsCropping(!isCropping)}
-                             className={cn(
-                                "w-full py-4 border rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3",
-                                isCropping 
-                                   ? "bg-[#e11d48] border-[#e11d48] text-white shadow-xl shadow-[#e11d48]/20" 
-                                   : "bg-white/5 border-white/10 text-neutral-400 hover:bg-white/10 hover:border-white/20"
-                             )}
-                          >
-                             {isCropping ? <><Check className="w-4 h-4" /> Confirm Crop Area</> : <><Maximize2 className="w-4 h-4" /> Enter Crop Mode</>}
-                          </button>
-                          
-                          {options.crop && !isCropping && (
-                             <div className="grid grid-cols-2 gap-2">
-                                <div className="p-3 bg-black/40 rounded-xl border border-white/5">
-                                   <p className="text-[8px] font-black text-neutral-500 uppercase mb-1">Position</p>
-                                   <p className="text-[10px] font-mono font-bold text-white">{options.crop.x}, {options.crop.y}</p>
-                                </div>
-                                <div className="p-3 bg-black/40 rounded-xl border border-white/5">
-                                   <p className="text-[8px] font-black text-neutral-500 uppercase mb-1">Dimensions</p>
-                                   <p className="text-[10px] font-mono font-bold text-white">{options.crop.width} x {options.crop.height}</p>
-                                </div>
-                             </div>
-                          )}
-                       </div>
-                    </EditorSection>
-
-                    <EditorSection title="Canvas Resolution" icon={<Monitor className="w-4 h-4" />}>
-                      <select 
-                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors"
-                        value={options.resolution || ""}
-                        onChange={(e) => setOptions({ ...options, resolution: e.target.value })}
-                      >
-                         <option value="">Original</option>
-                         <option value="1920x1080">1080p (FHD)</option>
-                         <option value="1280x720">720p (HD)</option>
-                         <option value="800x600">800x600 (SVGA)</option>
-                         <option value="640x480">640x480 (VGA)</option>
-                      </select>
-                    </EditorSection>
-                  </>
-                )}
-
-                {(type === 'video' || type === 'video-to-image' || type === 'audio') && (
-                  <>
-                    <EditorSection title={type === 'video-to-image' ? "Target Frame" : "Time Logic"} icon={<Scissors className="w-4 h-4" />}>
-                       {type === 'video-to-image' ? (
-                          <div className="space-y-4">
-                             <div className="p-6 bg-[#e11d48]/10 border border-[#e11d48]/20 rounded-2xl">
-                                <p className="text-[10px] font-bold text-[#e11d48] uppercase tracking-widest mb-1">Selected Moment:</p>
-                                <p className="text-3xl font-black italic">{currentTime.toFixed(3)}s</p>
-                             </div>
-                             <button 
-                               onClick={() => setOptions({ ...options, frameTimestamp: currentTime })}
-                               className="w-full py-4 bg-white/5 border border-white/10 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-white/10 transition-colors flex items-center justify-center gap-2"
-                             >
-                                <Check className="w-4 h-4" /> Lock Frame
-                             </button>
-                          </div>
-                       ) : (
-                          <div className="space-y-6">
-                             <div className="grid grid-cols-2 gap-3">
-                                <div className="space-y-1.5">
-                                   <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">Start (s)</label>
-                                   <input 
-                                     type="number" 
-                                     className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors"
-                                     value={options.trimStart || 0}
-                                     onChange={(e) => setOptions({ ...options, trimStart: parseFloat(e.target.value) })}
-                                   />
-                                </div>
-                                <div className="space-y-1.5">
-                                   <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">End (s)</label>
-                                   <input 
-                                     type="number" 
-                                     className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors"
-                                     value={options.trimEnd || duration}
-                                     onChange={(e) => setOptions({ ...options, trimEnd: parseFloat(e.target.value) })}
-                                   />
-                                </div>
-                             </div>
-                             <div className="p-4 bg-white/5 rounded-2xl border border-white/5 flex items-center justify-between">
-                                <p className="text-[10px] font-bold text-neutral-500 uppercase">Duration</p>
-                                <p className="text-sm font-black text-[#e11d48]">
-                                   {((options.trimEnd || duration) - (options.trimStart || 0)).toFixed(2)}s
-                                </p>
-                             </div>
-                          </div>
-                       )}
-                    </EditorSection>
-                  </>
-                )}
-
-                {type === 'audio' && (
-                  <EditorSection title="Acoustic Fidelity" icon={<Volume2 className="w-4 h-4" />}>
-                     <div className="space-y-4">
-                        <div className="space-y-1.5">
-                           <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">Bitrate (Audio Quality)</label>
-                           <div className="grid grid-cols-2 gap-2">
-                              {['128k', '192k', '256k', '320k'].map((br) => (
-                                 <button 
-                                   key={br}
-                                   onClick={() => setOptions({ ...options, audioBitrate: br })}
-                                   className={cn(
-                                     "py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all",
-                                     options.audioBitrate === br ? "bg-[#e11d48] border-[#e11d48] text-white shadow-lg shadow-[#e11d48]/20" : "bg-black/40 border-white/10 text-neutral-500 hover:border-white/20"
-                                   )}
-                                 >
-                                    {br}
-                                 </button>
-                              ))}
-                           </div>
-                        </div>
-                     </div>
-                  </EditorSection>
-                )}
-
-                 <div className="pt-8 border-t border-white/5 flex gap-3">
-                    <button onClick={onClose} className="flex-1 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-colors">Discard</button>
-                    <button onClick={handleSave} className="flex-[1.5] py-4 bg-[#e11d48] hover:bg-[#be123c] rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-xl shadow-[#e11d48]/20 flex items-center justify-center gap-2 group">
-                       Save <Check className="w-4 h-4" />
-                    </button>
-                 </div>
-              </div>
+              <EditorControls
+                type={type}
+                fileName={file.name}
+                targetFormat={target}
+                onApplyPreset={applyPreset}
+                options={options}
+                setOptions={setOptions}
+                currentTime={currentTime}
+                duration={duration}
+                isCropping={isCropping}
+                setIsCropping={setIsCropping}
+                onClose={onClose}
+                onSave={handleSave}
+              />
             </div>
           </motion.div>
         </div>
       )}
     </AnimatePresence>
-  );
-}
-
-function EditorSection({ title, icon, children }: { title: string, icon: React.ReactNode, children: React.ReactNode }) {
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3 text-[#e11d48]">
-        <div className="p-2 bg-[#e11d48]/10 rounded-lg">
-          {icon}
-        </div>
-        <h4 className="text-[12px] font-black uppercase tracking-[0.2em]">{title}</h4>
-      </div>
-      <div className="pl-1">
-        {children}
-      </div>
-    </div>
   );
 }

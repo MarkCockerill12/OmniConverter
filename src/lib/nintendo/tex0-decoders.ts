@@ -1,8 +1,15 @@
+import { zlibSync } from "fflate";
+
 export function decodeTEX0(data: Uint8Array): { width: number, height: number, rgba: Uint8Array } | null {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     if (view.getUint32(0) !== 0x54455830) return null;
     const width = view.getUint16(0x1C, false), height = view.getUint16(0x1E, false), format = view.getUint32(0x20, false);
-    const dataOff = view.getUint32(0x34, false), pixelData = data.slice(dataOff);
+    // TEX0 header: magic/size/version/bresOffset (0x00-0x0F), then the pixel
+    // data offset at 0x10. Reading it from anywhere else decodes the header
+    // bytes as pixels and produces blocky garbage.
+    const headerDataOff = view.getUint32(0x10, false);
+    const dataOff = headerDataOff > 0 && headerDataOff < data.length ? headerDataOff : 0x40;
+    const pixelData = data.slice(dataOff);
     if (format === 14) return { width, height, rgba: decodeCMPR(pixelData, width, height) };
     if (format === 6) return { width, height, rgba: decodeRGBA8(pixelData, width, height) };
     if (format === 5) return { width, height, rgba: decodeRGB5A3(pixelData, width, height) };
@@ -131,14 +138,72 @@ function decodeRGBA8(data: Uint8Array, width: number, height: number): Uint8Arra
     return output;
 }
 
-export function createBMP(rgba: Uint8Array, width: number, height: number): Uint8Array {
-    const fileHeaderSize = 14, infoHeaderSize = 40, pixelDataSize = width * height * 4;
-    const fileSize = fileHeaderSize + infoHeaderSize + pixelDataSize;
-    const buffer = new ArrayBuffer(fileSize), view = new DataView(buffer), u8 = new Uint8Array(buffer);
-    u8[0] = 0x42; u8[1] = 0x4D; view.setUint32(2, fileSize, true); view.setUint32(10, fileHeaderSize + infoHeaderSize, true);
-    view.setUint32(14, infoHeaderSize, true); view.setInt32(18, width, true); view.setInt32(22, -height, true); 
-    view.setUint16(26, 1, true); view.setUint16(28, 32, true); 
-    let p = fileHeaderSize + infoHeaderSize;
-    for (let i = 0; i < rgba.length; i += 4) { u8[p++] = rgba[i+2]; u8[p++] = rgba[i+1]; u8[p++] = rgba[i]; u8[p++] = rgba[i+3]; }
-    return u8;
+const CRC_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+        table[i] = c >>> 0;
+    }
+    return table;
+})();
+
+function crc32(bytes: Uint8Array) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function pngChunk(type: string, body: Uint8Array) {
+    const chunk = new Uint8Array(12 + body.length);
+    const view = new DataView(chunk.buffer);
+    view.setUint32(0, body.length, false);
+    for (let i = 0; i < 4; i++) chunk[4 + i] = type.charCodeAt(i);
+    chunk.set(body, 8);
+    const crcSpan = chunk.subarray(4, 8 + body.length);
+    view.setUint32(8 + body.length, crc32(crcSpan), false);
+    return chunk;
+}
+
+/**
+ * Encodes decoded TEX0 pixels as a true-colour PNG.
+ *
+ * TEX0 formats such as RGB5A3, IA4/IA8 and CMPR carry real alpha (eyes, glasses,
+ * decals), and browsers do not reliably honour the alpha channel of a 32-bit BMP.
+ * PNG round-trips it exactly, and fflate already gives us the deflate stream.
+ */
+export function createPNG(rgba: Uint8Array, width: number, height: number): Uint8Array {
+    // Each scanline is prefixed with its filter type (0 = none).
+    const stride = width * 4;
+    const raw = new Uint8Array((stride + 1) * height);
+    for (let y = 0; y < height; y++) {
+        raw[y * (stride + 1)] = 0;
+        raw.set(rgba.subarray(y * stride, y * stride + stride), y * (stride + 1) + 1);
+    }
+
+    const ihdr = new Uint8Array(13);
+    const ihdrView = new DataView(ihdr.buffer);
+    ihdrView.setUint32(0, width, false);
+    ihdrView.setUint32(4, height, false);
+    ihdr[8] = 8;  // bit depth
+    ihdr[9] = 6;  // colour type: truecolour with alpha
+    ihdr[10] = 0; // deflate
+    ihdr[11] = 0; // adaptive filtering
+    ihdr[12] = 0; // no interlace
+
+    const signature = new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    const chunks = [
+        signature,
+        pngChunk("IHDR", ihdr),
+        pngChunk("IDAT", zlibSync(raw, { level: 6 })),
+        pngChunk("IEND", new Uint8Array(0)),
+    ];
+
+    const out = new Uint8Array(chunks.reduce((sum, c) => sum + c.length, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+    }
+    return out;
 }

@@ -3,21 +3,8 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useWorkers } from "@/hooks/use-workers";
-import { useStore } from "@/lib/store";
-import { 
-  DownloadCloud, 
-  Link as LinkIcon, 
-  Zap, 
-  Search, 
-  Music, 
-  Video, 
-  Globe,
-  Loader2,
-  AlertCircle,
-  Download
-} from "lucide-react";
-import { cn } from "@/lib/utils";
-import { StatusBadge } from "@/components/converter/format-selector";
+import { Link as LinkIcon, Zap, Music, Video, Loader2, AlertCircle, Download } from "lucide-react";
+import { cn, downloadBlob } from "@/lib/utils";
 import { PasswordGate } from "@/components/downloader/password-gate";
 
 const PLATFORM_MAP: Record<string, { label: string, color: string, icon: string }> = {
@@ -51,8 +38,7 @@ function detectPlatformFrontend(url: string) {
 }
 
 export default function DownloaderPage() {
-  const { scraperWorker } = useWorkers();
-  const { isScraperReady } = useStore();
+  const { scraperWorker } = useWorkers("scraper");
   const [isAuthorized, setIsAuthorized] = useState(false);
   const [url, setUrl] = useState("");
   const [isScraping, setIsScraping] = useState(false);
@@ -134,26 +120,19 @@ export default function DownloaderPage() {
       // Use local proxy to bypass CORS
       const proxyUrl = `/api/proxy?url=${encodeURIComponent(downloadUrl)}`;
       const res = await fetch(proxyUrl);
+      if (!res.ok || !res.body) throw new Error(`Proxy returned ${res.status}`);
       const total = parseInt(res.headers.get('content-length') || '0', 10);
-      const reader = res.body!.getReader();
-      const chunks: Uint8Array[] = [];
+      const reader = res.body.getReader();
+      const chunks: BlobPart[] = [];
       let received = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        chunks.push(value);
+        chunks.push(value as BlobPart);
         received += value.length;
         if (total) setDownloadState(s => ({ ...s, progress: Math.round((received / total) * 100) }));
       }
-      const blob = new Blob(chunks as any);
-      const objUrl = URL.createObjectURL(blob);
-      const a = document.createElement('a'); 
-      a.href = objUrl; 
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click(); 
-      document.body.removeChild(a);
-      URL.revokeObjectURL(objUrl);
+      downloadBlob(new Blob(chunks), filename);
     } catch (err) {
       console.error("Download failed:", err);
       alert("Download failed. See console for details.");
@@ -289,7 +268,7 @@ export default function DownloaderPage() {
                   <div className="flex flex-col gap-6">
                     <div className="flex items-center gap-4 border-b border-white/10 pb-6">
                       <div className="w-16 h-16 rounded-xl bg-neutral-800 overflow-hidden shrink-0">
-                        {result.thumbnail && <img src={result.thumbnail} className="w-full h-full object-cover" />}
+                        {result.thumbnail && <img src={result.thumbnail} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-full h-full object-cover" />}
                       </div>
                       <div>
                         <h3 className="text-2xl font-black tracking-tight uppercase italic line-clamp-1">{result.title}</h3>
@@ -300,7 +279,7 @@ export default function DownloaderPage() {
                     <div className="max-h-[400px] overflow-y-auto pr-2 space-y-3 custom-scrollbar">
                       {result.videos.map((vid: any, idx: number) => (
                         <div key={idx} className="flex gap-4 p-3 bg-white/5 hover:bg-white/10 transition-colors rounded-xl border border-white/5 items-center">
-                          <img src={vid.thumbnail} className="w-24 aspect-video object-cover rounded-lg" />
+                          <img src={vid.thumbnail} alt="" loading="lazy" referrerPolicy="no-referrer" className="w-24 aspect-video object-cover rounded-lg" />
                           <div className="flex-1">
                             <h4 className="font-bold line-clamp-1 text-sm">{vid.title}</h4>
                             <p className="text-xs text-neutral-500 font-medium mt-1">{vid.duration}</p>
@@ -319,7 +298,7 @@ export default function DownloaderPage() {
                   <div className="flex flex-col md:flex-row gap-8 items-start">
                     <div className="w-full md:w-64 aspect-video rounded-xl bg-neutral-800 overflow-hidden relative border border-white/10 shrink-0">
                       {result.thumbnail ? (
-                        <img src={result.thumbnail} className="w-full h-full object-cover opacity-80" alt="" />
+                        <img src={result.thumbnail} className="w-full h-full object-cover opacity-80" alt="" loading="lazy" referrerPolicy="no-referrer" />
                       ) : (
                         <div className="w-full h-full flex items-center justify-center">
                           <Music className="w-12 h-12 text-neutral-600" />

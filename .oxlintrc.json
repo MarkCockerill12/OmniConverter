@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/npm/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "nextjs"],
+  "env": { "browser": true, "worker": true, "node": true, "es2024": true },
+  "categories": { "correctness": "error", "suspicious": "warn" },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "typescript/no-explicit-any": "off",
+    "react/no-unescaped-entities": "off",
+    "nextjs/no-img-element": "off"
+  },
+  "ignorePatterns": [".next", "node_modules", "cloudflare-proxy", "pi-scraper"]
+}

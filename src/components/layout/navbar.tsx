@@ -2,8 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Zap, Cpu, FileBox, DownloadCloud } from "lucide-react";
-import { useStore } from "@/lib/store";
+import { FileBox, DownloadCloud } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Navbar() {
