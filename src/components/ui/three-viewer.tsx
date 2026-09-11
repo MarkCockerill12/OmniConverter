@@ -19,6 +19,7 @@ import {
   applyDisplayMode,
   collectStats,
   createTextureResolver,
+  flipYForModel,
   disposeObject,
   isConsoleModel,
   type DisplayMode,
@@ -267,10 +268,11 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
         const manager = new THREE.LoadingManager();
         manager.setURLModifier(createTextureResolver(modelInfo.textures, modelInfo.path));
         const textureLoader = new THREE.TextureLoader(manager);
+        const flipY = flipYForModel(modelInfo.path);
         // Re-run the material pass once every queued texture has settled.
         manager.onLoad = () => {
           if (!loaded) return;
-          applyMaterialFixes(loaded, modelInfo.textures, textureLoader);
+          applyMaterialFixes(loaded, modelInfo.textures, textureLoader, { flipY });
           applyDisplayMode(modelsGroupRef.current, displayMode, unlitRef.current);
         };
 
@@ -281,7 +283,7 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
             return;
           }
           loaded = object;
-          applyMaterialFixes(object, modelInfo.textures, textureLoader);
+          applyMaterialFixes(object, modelInfo.textures, textureLoader, { flipY });
 
           const pivot = new THREE.Group();
           pivot.add(object);

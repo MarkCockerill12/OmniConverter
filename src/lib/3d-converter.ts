@@ -122,6 +122,45 @@ export async function discoverModels(
   return models;
 }
 
+/**
+ * Archives hold models in two shapes. A console container (.szs) splits one
+ * subject across several MDL0 files that must be merged, so those pass through
+ * untouched. Ripped ZIPs instead ship standalone variants in sibling folders —
+ * Models Resource puts "Z-Powered" or "Other Bag" next to the base character —
+ * and merging those stacks two characters plus a prop at the same origin. When
+ * such an archive spreads models across directories, only the primary group
+ * (shallowest, then largest) is converted; the rest stay reachable from the
+ * Forge catalogue, which lists every discovered model.
+ */
+export function selectPrimaryModels(models: DiscoveredModel[]): DiscoveredModel[] {
+  if (models.length < 2) return models;
+  if (models.some((m) => getExtension(m.path) === "mdl0")) return models;
+
+  const groups = new Map<string, DiscoveredModel[]>();
+  for (const model of models) {
+    const slash = model.path.lastIndexOf("/");
+    const dir = slash === -1 ? "" : model.path.slice(0, slash);
+    const bucket = groups.get(dir);
+    if (bucket) bucket.push(model);
+    else groups.set(dir, [model]);
+  }
+  if (groups.size < 2) return models;
+
+  let best = models;
+  let bestDepth = Infinity;
+  let bestSize = -Infinity;
+  for (const [dir, bucket] of groups) {
+    const depth = dir === "" ? 0 : dir.split("/").length;
+    const size = bucket.reduce((total, m) => total + m.file.size, 0);
+    if (depth < bestDepth || (depth === bestDepth && size > bestSize)) {
+      bestDepth = depth;
+      bestSize = size;
+      best = bucket;
+    }
+  }
+  return best;
+}
+
 /** Releases every blob URL created by {@link discoverModels}. */
 export function revokeTextures(textures: TextureMap) {
   for (const url of new Set(Object.values(textures))) {
@@ -207,23 +246,44 @@ export async function loadModelObject(
   }
 }
 
-/** Waits until every image referenced by the object has finished decoding. */
-async function awaitTextures(object: THREE_NS.Object3D) {
-  const pending: Promise<unknown>[] = [];
+/**
+ * Waits until every texture referenced by the object has decoded.
+ *
+ * TextureLoader hands back a Texture whose `image` stays undefined until the
+ * request finishes, so watching for an incomplete HTMLImageElement misses any
+ * texture still in flight and the exporter then rejects it with "No valid image
+ * data found". Polling the textures themselves covers both states, and every
+ * slot is checked rather than just `map`. An image that fails to load still
+ * reports `complete`, so a broken reference falls through to the deadline
+ * instead of stalling the conversion.
+ */
+async function awaitTextures(object: THREE_NS.Object3D, timeoutMs = 15_000) {
+  const textures = new Set<any>();
   object.traverse((child: any) => {
     if (!child.isMesh) return;
     const mats = Array.isArray(child.material) ? child.material : [child.material];
     for (const mat of mats) {
-      const image = mat?.map?.image;
-      if (image instanceof HTMLImageElement && !image.complete) {
-        pending.push(new Promise((resolve) => {
-          image.addEventListener("load", resolve, { once: true });
-          image.addEventListener("error", resolve, { once: true });
-        }));
+      if (!mat) continue;
+      for (const key of Object.keys(mat)) {
+        const value = mat[key];
+        if (value && typeof value === "object" && value.isTexture) textures.add(value);
       }
     }
   });
-  if (pending.length) await Promise.all(pending);
+  if (textures.size === 0) return;
+
+  const decoded = (texture: any) => {
+    const image = texture.image;
+    if (!image) return false;
+    // Canvas and ImageBitmap sources carry their pixels immediately.
+    return image instanceof HTMLImageElement ? image.complete : true;
+  };
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ([...textures].every(decoded)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 export interface ExportOptions {
@@ -284,15 +344,16 @@ export async function convert3DModelHeadless(
   nintendoWorker?: Worker | null
 ): Promise<Blob> {
   const THREE = await import("three");
-  const { createTextureResolver, applyMaterialFixes, disposeObject } = await import("./3d-materials");
+  const { createTextureResolver, applyMaterialFixes, disposeObject, flipYForModel } = await import("./3d-materials");
 
-  const discovered = await discoverModels(file, { nintendoWorker });
-  if (discovered.length === 0) {
+  const found = await discoverModels(file, { nintendoWorker });
+  if (found.length === 0) {
     throw new Error(`No 3D model found in ${file.name}.`);
   }
+  const discovered = selectPrimaryModels(found);
 
   const root = new THREE.Group();
-  const textures = discovered[0].textures;
+  const textures = found[0].textures;
   // Plain model files keep their authored materials untouched; archives go
   // through the repair pipeline so their loose textures get re-attached.
   const needsRepair = Object.keys(textures).length > 0;
@@ -301,7 +362,16 @@ export async function convert3DModelHeadless(
     const manager = new THREE.LoadingManager();
     manager.setURLModifier(createTextureResolver(model.textures, model.path));
     const object = await loadModelObject(model.file, manager, nintendoWorker);
-    if (needsRepair) applyMaterialFixes(object, model.textures, new THREE.TextureLoader(manager));
+    if (needsRepair) {
+      const textureLoader = new THREE.TextureLoader(manager);
+      const flipY = flipYForModel(model.path);
+      applyMaterialFixes(object, model.textures, textureLoader, { flipY });
+      // Classifying a texture's alpha needs its pixels, and the loaders resolve
+      // before their images decode. The viewport gets this from the manager's
+      // onLoad; here a second pass over settled textures does the same job.
+      await awaitTextures(object);
+      applyMaterialFixes(object, model.textures, textureLoader, { flipY });
+    }
     root.add(object);
   }
 

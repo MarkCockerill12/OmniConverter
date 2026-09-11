@@ -66,6 +66,94 @@ export function createTextureResolver(textures: TextureMap, modelPath = "") {
   };
 }
 
+/**
+ * True when a geometry's UVs leave the 0-1 square, meaning the mesh picks its
+ * region of an atlas by tiling and therefore needs real wrapping. 3DS face
+ * atlases do exactly this (V runs past 2), so clamping them collapses the whole
+ * face to a single smeared row of texels. Cached per geometry.
+ */
+function uvsTile(geometry: any): boolean {
+  if (!geometry) return false;
+  if (geometry.userData.omniUvTiles !== undefined) return geometry.userData.omniUvTiles;
+  const uv = geometry.getAttribute?.("uv");
+  let tiles = false;
+  if (uv) {
+    for (let i = 0; i < uv.count; i++) {
+      const u = uv.getX(i);
+      const v = uv.getY(i);
+      if (u < 0 || u > 1 || v < 0 || v > 1) { tiles = true; break; }
+    }
+  }
+  geometry.userData.omniUvTiles = tiles;
+  return tiles;
+}
+
+type AlphaKind = "opaque" | "binary" | "graded";
+
+const alphaKindCache = new WeakMap<object, AlphaKind>();
+
+/**
+ * Classifies a decoded texture's alpha channel so a material can pick the
+ * cheapest blending mode that is still correct.
+ *
+ * This matters most on export: glTF carries only alphaMode, and a material
+ * marked transparent becomes BLEND, which does not write depth. A fully opaque
+ * face decal exported as BLEND turns see-through and flickers as the camera
+ * moves in any viewer that sorts differently to ours — Blender included. Ripped
+ * console decals are almost always fully opaque or hard-edged cutouts, so they
+ * belong in OPAQUE or MASK. Returns "opaque" when the image cannot be read,
+ * which is the safe default. Cached per image.
+ */
+function textureAlphaKind(texture: any): AlphaKind {
+  const image = texture?.image;
+  if (!image) return "opaque";
+  const cached = alphaKindCache.get(image);
+  if (cached) return cached;
+
+  const width = image.naturalWidth ?? image.width ?? 0;
+  const height = image.naturalHeight ?? image.height ?? 0;
+  if (!width || !height) return "opaque";
+
+  let kind: AlphaKind = "opaque";
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return "opaque";
+    ctx.drawImage(image, 0, 0);
+    const { data } = ctx.getImageData(0, 0, width, height);
+    const pixels = width * height;
+    // Very large atlases are sampled rather than scanned exhaustively.
+    const step = Math.max(1, Math.floor(pixels / 1_000_000));
+    for (let p = 0; p < pixels; p += step) {
+      const alpha = data[p * 4 + 3];
+      if (alpha === 255) continue;
+      if (alpha === 0) { kind = "binary"; continue; }
+      kind = "graded";
+      break;
+    }
+  } catch {
+    // A tainted or undecodable image cannot be classified; treat it as opaque.
+    return "opaque";
+  }
+
+  alphaKindCache.set(image, kind);
+  return kind;
+}
+
+/**
+ * Texture V-origin by source format. glTF and the console parsers author UVs
+ * with a top-left origin, so their maps must not be flipped; COLLADA, OBJ and
+ * FBX follow the OpenGL bottom-left convention that TextureLoader assumes.
+ * Getting this wrong mirrors every atlas vertically, which is why 3DS DAE rips
+ * used to come out with the face and body regions swapped.
+ */
+export function flipYForModel(path: string) {
+  const ext = path.toLowerCase().split(".").pop() || "";
+  return !(ext === "glb" || ext === "gltf" || ext === "mdl0");
+}
+
 const SEMANTIC_TAGS = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth", "face", "mouth", "tire", "wheel", "all", "body"];
 
 /**
@@ -73,7 +161,12 @@ const SEMANTIC_TAGS = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth",
  * on material/mesh/Wii texture names) and applies the transparency,
  * render-order and wrap-mode heuristics that keep Wii-era models correct.
  */
-export function applyMaterialFixes(model: THREE.Object3D, textures: TextureMap, textureLoader: THREE.TextureLoader) {
+export function applyMaterialFixes(
+  model: THREE.Object3D,
+  textures: TextureMap,
+  textureLoader: THREE.TextureLoader,
+  options: { flipY?: boolean } = {}
+) {
   const sortedTextureKeys = Object.keys(textures).sort((a, b) => b.length - a.length);
 
   model.traverse((child: any) => {
@@ -145,23 +238,34 @@ export function applyMaterialFixes(model: THREE.Object3D, textures: TextureMap, 
       const isMustache = matName.includes("mustache") || meshName.includes("mustache");
       const isOverlay = isEye || isMouth || isMustache || matName.includes("alpha") || matName.includes("overlay");
 
+      // Being an overlay decides where the decal sits, not how it blends — that
+      // follows the texture's own alpha, so a decal with nothing to blend stays
+      // opaque and keeps writing depth.
+      const alphaKind = textureAlphaKind(mat.map);
+      const blended = isOverlay && alphaKind === "graded";
+      const cutout = isOverlay && alphaKind === "binary";
+
+      mat.vertexColors = false;
+      mat.transparent = blended;
+      mat.alphaTest = cutout ? 0.5 : 0;
+
       if (isOverlay) {
-        mat.transparent = true;
-        mat.vertexColors = false;
-        mat.alphaTest = 0.5;
+        // Decals sit flush against the head. The polygon offset is what
+        // actually wins the depth test; drawing them after the face is a cheap
+        // belt-and-braces for anywhere the offset is unavailable or too small.
+        // Both are viewport-only — glTF carries neither, which is why an
+        // exported decal has to stay opaque rather than lean on draw order.
         mat.polygonOffset = true;
         mat.polygonOffsetFactor = -2;
         mat.polygonOffsetUnits = -8;
         child.renderOrder = isEye ? 50 : isMouth ? 10 : 20;
       } else {
-        mat.transparent = false;
-        mat.vertexColors = false;
-        mat.alphaTest = 0;
+        mat.polygonOffset = false;
         child.renderOrder = 0;
       }
 
       mat.side = THREE.DoubleSide;
-      mat.depthWrite = !isOverlay;
+      mat.depthWrite = !blended;
       mat.depthTest = true;
 
       // NINTENDO WRAP MODES
@@ -169,10 +273,17 @@ export function applyMaterialFixes(model: THREE.Object3D, textures: TextureMap, 
         mat.map.wrapS = mat.userData.wrapS;
         mat.map.wrapT = mat.userData.wrapT;
       } else {
-        mat.map.wrapS = mat.map.wrapT = isEye ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+        // Eye atlases are clamped to stop neighbouring texels bleeding in, but
+        // only when the UVs stay inside the unit square — a mesh that indexes
+        // its atlas by tiling must keep wrapping or it loses the whole region.
+        const clampEye = isEye && !uvsTile(child.geometry);
+        mat.map.wrapS = mat.map.wrapT = clampEye ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
       }
 
-      mat.map.flipY = false; // console UVs use a top-left origin
+      // Console parsers emit top-left UVs regardless of the container they
+      // came from; everything else follows the caller's per-format convention.
+      const isConsoleMat = mat.userData.wiiTextureName !== undefined;
+      mat.map.flipY = isConsoleMat ? false : (options.flipY ?? false);
       mat.map.colorSpace = THREE.SRGBColorSpace;
       mat.map.minFilter = mat.map.magFilter = THREE.LinearFilter;
       mat.map.needsUpdate = true;
