@@ -250,13 +250,15 @@ export function applyMaterialFixes(
       mat.alphaTest = cutout ? 0.5 : 0;
 
       if (isOverlay) {
-        // Decals sit flush against the head, so nudge them towards the camera.
-        // glTF has no polygon offset, which is why an exported decal has to
-        // carry its own depth instead of relying on draw order.
+        // Decals sit flush against the head. The polygon offset is what
+        // actually wins the depth test; drawing them after the face is a cheap
+        // belt-and-braces for anywhere the offset is unavailable or too small.
+        // Both are viewport-only — glTF carries neither, which is why an
+        // exported decal has to stay opaque rather than lean on draw order.
         mat.polygonOffset = true;
         mat.polygonOffsetFactor = -2;
         mat.polygonOffsetUnits = -8;
-        child.renderOrder = blended ? (isEye ? 50 : isMouth ? 10 : 20) : 0;
+        child.renderOrder = isEye ? 50 : isMouth ? 10 : 20;
       } else {
         mat.polygonOffset = false;
         child.renderOrder = 0;
