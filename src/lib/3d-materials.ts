@@ -44,20 +44,24 @@ export function createTextureResolver(textures: TextureMap, modelPath = "") {
       if (fixMatch) return textures[fixMatch];
     }
 
-    const direct =
-      textures[normalized] ??
-      textures[decodeURIComponent(normalized)] ??
-      textures[fileName] ??
-      textures[decodedFileName] ??
-      textures[baseName] ??
-      textures[decodedBaseName];
-    if (direct) return direct;
+    const byPath = textures[normalized] ?? textures[decodeURIComponent(normalized)];
+    if (byPath) return byPath;
 
+    // The model's own folder comes before any bare name: an archive can ship a
+    // remastered copy of a texture under the same file name in a sub-folder,
+    // and the model beside the original must not pick that one up.
     if (modelPath.includes("/")) {
       const modelDir = modelPath.substring(0, modelPath.lastIndexOf("/"));
-      const relative = textures[`${modelDir}/${normalized}`] ?? textures[`${modelDir}/${fileName}`];
+      const relative =
+        textures[`${modelDir}/${normalized}`] ??
+        textures[`${modelDir}/${fileName}`] ??
+        textures[`${modelDir}/${decodedFileName}`];
       if (relative) return relative;
     }
+
+    const direct =
+      textures[fileName] ?? textures[decodedFileName] ?? textures[baseName] ?? textures[decodedBaseName];
+    if (direct) return direct;
 
     const anyMatch = Object.keys(textures).find(
       (k) => k.endsWith("/" + fileName) || k === fileName || k.endsWith("/" + decodedFileName) || k === decodedFileName

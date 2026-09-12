@@ -11,6 +11,7 @@ import {
   loadModelObject,
   exportModel,
   revokeTextures,
+  selectPrimaryModels,
   type DiscoveredModel,
   type ExportOptions,
 } from "@/lib/3d-converter";
@@ -204,8 +205,16 @@ const ThreeDViewer = forwardRef<ThreeDViewerHandle, ThreeDViewerProps>(({
             textures: providedTextures[file.name],
             nintendoWorker,
           });
+          // Every model stays in the catalogue, but a ripped archive opens on
+          // the subject itself rather than on whichever LOD or vertex-colour
+          // bake happens to come first in the ZIP.
+          const opensWith = found.length === 0 ? selectPrimaryModels(models)[0]?.path : undefined;
           for (const model of models) {
-            found.push({ ...model, id: `${file.name}:${model.path}`, visible: found.length === 0 });
+            found.push({
+              ...model,
+              id: `${file.name}:${model.path}`,
+              visible: model.path === opensWith,
+            });
           }
         }
 

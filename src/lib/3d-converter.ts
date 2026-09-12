@@ -93,15 +93,30 @@ export async function discoverModels(
   const textures: TextureMap = { ...options.textures };
   const entries = Object.entries(unpacked);
 
+  // Bare file-name and base-name keys are ambiguous: rips ship remastered copies
+  // of a texture under the same name in a sub-folder ("Switch/MoonRabbitBody.png"
+  // beside the Wii original). The deeper copy must not claim the short key, or a
+  // model that asks for "MoonRabbitBody.png" gets the wrong console's atlas.
+  const keyDepth = new Map<string, number>();
+  for (const key of Object.keys(textures)) keyDepth.set(key, 0);
+  const claimShortKey = (key: string, depth: number, url: string) => {
+    const owner = keyDepth.get(key);
+    if (owner !== undefined && owner <= depth) return;
+    keyDepth.set(key, depth);
+    textures[key] = url;
+  };
+
   for (const [path, data] of entries) {
     if (data.length === 0 || !isTextureFile(path)) continue;
     const normalized = path.replace(/\\/g, "/");
     const filename = normalized.split("/").pop() || normalized;
+    const depth = normalized.split("/").length;
     const url = URL.createObjectURL(new Blob([data as BlobPart], { type: imageMimeFor(getExtension(filename)) }));
+    // Full paths are unique, so they are always safe to write.
     textures[normalized] = url;
-    textures[filename] = url;
     textures[path] = url;
-    textures[filename.replace(/\.[^/.]+$/, "")] = url;
+    claimShortKey(filename, depth, url);
+    claimShortKey(filename.replace(/\.[^/.]+$/, ""), depth, url);
   }
 
   const models: DiscoveredModel[] = [];
@@ -122,15 +137,63 @@ export async function discoverModels(
   return models;
 }
 
+/** Trailing markers a ripper adds to alternate copies of one subject. */
+const LOD_MARKERS = ["lowpoly", "low", "middle", "mid", "high", "hi", "lod0", "lod1", "lod2", "lod3", "lod"];
+const BAKE_MARKERS = ["baked", "bakes", "bake"];
+
+/**
+ * Removes one trailing marker, but only where it reads as a suffix rather than
+ * as the tail of a word: after a separator ("MoonRabbit_low") or at a camel-case
+ * boundary ("MoonRabbitLow"). "Pyramid" therefore keeps its "mid".
+ */
+function stripMarker(name: string, markers: string[]): string {
+  const lower = name.toLowerCase();
+  for (const marker of markers) {
+    if (!lower.endsWith(marker)) continue;
+    const head = name.slice(0, name.length - marker.length);
+    if (!head) continue;
+    if (/[_\-. ]$/.test(head)) return head.replace(/[_\-. ]+$/, "");
+    if (/[a-z0-9]$/.test(head) && /^[A-Z]/.test(name.slice(head.length))) return head;
+  }
+  return name;
+}
+
+/**
+ * Reduces a file name to the subject it depicts, so "MoonRabbit.dae",
+ * "MoonRabbitLow.dae" and "MoonRabbit_bake.dae" share a stem. Only trailing
+ * markers go — "TrickRabbit" keeps its own stem, because it is a different
+ * character rather than another take on the same one.
+ */
+function variantStem(path: string): string {
+  const name = (path.split("/").pop() || path).replace(/\.[^/.]+$/, "");
+  let stem = name;
+  for (let i = 0; i < 3; i++) {
+    const stripped = stripMarker(stripMarker(stem, BAKE_MARKERS), LOD_MARKERS);
+    if (stripped === stem) break;
+    stem = stripped;
+  }
+  return (stem || name).toLowerCase();
+}
+
+/** True when the model is a ripper's vertex-colour bake of another model. */
+function isBakeVariant(path: string): boolean {
+  const name = (path.split("/").pop() || path).replace(/\.[^/.]+$/, "");
+  return stripMarker(name, BAKE_MARKERS) !== name;
+}
+
 /**
  * Archives hold models in two shapes. A console container (.szs) splits one
  * subject across several MDL0 files that must be merged, so those pass through
- * untouched. Ripped ZIPs instead ship standalone variants in sibling folders —
- * Models Resource puts "Z-Powered" or "Other Bag" next to the base character —
- * and merging those stacks two characters plus a prop at the same origin. When
- * such an archive spreads models across directories, only the primary group
- * (shallowest, then largest) is converted; the rest stay reachable from the
- * Forge catalogue, which lists every discovered model.
+ * untouched. Ripped ZIPs instead ship alternate copies of a subject — Models
+ * Resource puts "Z-Powered" or "Other Bag" in a sibling folder, and stacks
+ * "MoonRabbit", "MoonRabbitLow", "MoonRabbitMiddle" and a "_bake" twin of each
+ * in one folder. Merging any of those puts several copies of the same character
+ * at one origin, which reads as a model wearing two textures at once.
+ *
+ * Two passes narrow the archive down: the primary directory (shallowest, then
+ * largest) wins, and within it each variant family collapses to its best member
+ * — full detail over an LOD, the plain model over its vertex-colour bake. The
+ * rest stay reachable from the Forge catalogue, which lists every model found.
  */
 export function selectPrimaryModels(models: DiscoveredModel[]): DiscoveredModel[] {
   if (models.length < 2) return models;
@@ -144,21 +207,50 @@ export function selectPrimaryModels(models: DiscoveredModel[]): DiscoveredModel[
     if (bucket) bucket.push(model);
     else groups.set(dir, [model]);
   }
-  if (groups.size < 2) return models;
 
   let best = models;
-  let bestDepth = Infinity;
-  let bestSize = -Infinity;
-  for (const [dir, bucket] of groups) {
-    const depth = dir === "" ? 0 : dir.split("/").length;
-    const size = bucket.reduce((total, m) => total + m.file.size, 0);
-    if (depth < bestDepth || (depth === bestDepth && size > bestSize)) {
-      bestDepth = depth;
-      bestSize = size;
-      best = bucket;
+  if (groups.size > 1) {
+    let bestDepth = Infinity;
+    let bestSize = -Infinity;
+    for (const [dir, bucket] of groups) {
+      const depth = dir === "" ? 0 : dir.split("/").length;
+      const size = bucket.reduce((total, m) => total + m.file.size, 0);
+      if (depth < bestDepth || (depth === bestDepth && size > bestSize)) {
+        bestDepth = depth;
+        bestSize = size;
+        best = bucket;
+      }
     }
   }
-  return best;
+
+  return collapseVariants(best);
+}
+
+/** Keeps one model per variant family: no bake twin, no LOD, largest wins. */
+function collapseVariants(models: DiscoveredModel[]): DiscoveredModel[] {
+  if (models.length < 2) return models;
+  const families = new Map<string, DiscoveredModel>();
+  const order: string[] = [];
+
+  for (const model of models) {
+    const stem = variantStem(model.path);
+    const held = families.get(stem);
+    if (!held) {
+      families.set(stem, model);
+      order.push(stem);
+      continue;
+    }
+    const heldIsBake = isBakeVariant(held.path);
+    const modelIsBake = isBakeVariant(model.path);
+    if (heldIsBake !== modelIsBake) {
+      if (heldIsBake) families.set(stem, model);
+      continue;
+    }
+    // Same flavour: the biggest file is the most detailed copy.
+    if (model.file.size > held.file.size) families.set(stem, model);
+  }
+
+  return order.map((stem) => families.get(stem)!);
 }
 
 /** Releases every blob URL created by {@link discoverModels}. */
@@ -166,6 +258,54 @@ export function revokeTextures(textures: TextureMap) {
   for (const url of new Set(Object.values(textures))) {
     if (url.startsWith("blob:")) URL.revokeObjectURL(url);
   }
+}
+
+/**
+ * Removes the vertex-colour copy a ripper bakes into "_bake" exports.
+ *
+ * Those files carry the subject twice: the textured mesh, plus an identical
+ * copy ("m0_VC") whose only map is a greyscale bake of the vertex colours. The
+ * two occupy the same coordinates, so the bake wins half the depth test and the
+ * model renders as a grey, flickering shell of itself. The copy is only dropped
+ * when a normally textured mesh survives it.
+ */
+function dropVertexColourBakeMeshes(root: THREE_NS.Object3D) {
+  const isBakeMesh = (child: any) => {
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    const named = (value: unknown) => String(value || "").toLowerCase().replace(/[\s_-]/g, "");
+    return (
+      mats.some((mat: any) => mat && named(mat.name) === "vertexcolors") ||
+      /[_\-. ]vc$/i.test(String(child.name || ""))
+    );
+  };
+
+  const bakes: any[] = [];
+  let textured = 0;
+  root.traverse((child: any) => {
+    if (!child.isMesh) return;
+    if (isBakeMesh(child)) bakes.push(child);
+    else textured++;
+  });
+  if (!textured || !bakes.length) return;
+
+  for (const mesh of bakes) {
+    mesh.parent?.remove(mesh);
+    mesh.geometry?.dispose?.();
+  }
+}
+
+/** Fraction of space two boxes share, padded so flat models still compare. */
+function boxOverlapRatio(a: THREE_NS.Box3, b: THREE_NS.Box3): number {
+  const pad = 1e-4 * Math.max(a.max.x - a.min.x, a.max.y - a.min.y, a.max.z - a.min.z, 1);
+  const volume = (box: THREE_NS.Box3) =>
+    (box.max.x - box.min.x + pad) * (box.max.y - box.min.y + pad) * (box.max.z - box.min.z + pad);
+  const span = (lo: number, hi: number) => Math.max(0, hi - lo) + pad;
+  const inter =
+    span(Math.max(a.min.x, b.min.x), Math.min(a.max.x, b.max.x)) *
+    span(Math.max(a.min.y, b.min.y), Math.min(a.max.y, b.max.y)) *
+    span(Math.max(a.min.z, b.min.z), Math.min(a.max.z, b.max.z));
+  const union = volume(a) + volume(b) - inter;
+  return union > 0 ? inter / union : 0;
 }
 
 /**
@@ -191,7 +331,7 @@ export async function loadModelObject(
   }
 
   try {
-    return await new Promise<THREE_NS.Object3D>((resolve, reject) => {
+    const object = await new Promise<THREE_NS.Object3D>((resolve, reject) => {
       const fail = (err: unknown) => reject(err instanceof Error ? err : new Error(`Could not read ${file.name}`));
 
       if (isGLB || ext === "glb" || ext === "gltf") {
@@ -240,6 +380,8 @@ export async function loadModelObject(
         fail(new Error(`Unsupported 3D format: .${ext.toUpperCase()}`));
       }
     });
+    dropVertexColourBakeMeshes(object);
+    return object;
   } finally {
     // Loaders read the blob synchronously during load(); revoke on the next tick.
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
@@ -357,11 +499,26 @@ export async function convert3DModelHeadless(
   // Plain model files keep their authored materials untouched; archives go
   // through the repair pipeline so their loose textures get re-attached.
   const needsRepair = Object.keys(textures).length > 0;
+  // A console container splits one subject across several files that belong
+  // together; a ripped archive can still hold copies the name rules miss, and
+  // those sit on top of the model already added. Space decides between them.
+  const checkOverlap = discovered.length > 1 && !discovered.some((m) => getExtension(m.path) === "mdl0");
+  const placed: THREE_NS.Box3[] = [];
 
   for (const model of discovered) {
     const manager = new THREE.LoadingManager();
     manager.setURLModifier(createTextureResolver(model.textures, model.path));
     const object = await loadModelObject(model.file, manager, nintendoWorker);
+    if (checkOverlap) {
+      const box = new THREE.Box3().setFromObject(object);
+      if (!box.isEmpty()) {
+        if (placed.some((other) => boxOverlapRatio(other, box) >= 0.6)) {
+          disposeObject(object);
+          continue;
+        }
+        placed.push(box);
+      }
+    }
     if (needsRepair) {
       const textureLoader = new THREE.TextureLoader(manager);
       const flipY = flipYForModel(model.path);
