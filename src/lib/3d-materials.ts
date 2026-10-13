@@ -158,6 +158,21 @@ export function flipYForModel(path: string) {
   return !(ext === "glb" || ext === "gltf" || ext === "mdl0");
 }
 
+/**
+ * True for formats that carry a complete material definition of their own.
+ *
+ * glTF states alpha mode, cutoff, factors, wrap modes and mip filters in the
+ * file, and GLTFLoader applies all of them. Running the repair heuristics over
+ * that can only damage it — forcing `alphaTest = 0` turns a MASK cutout's
+ * transparent texels black in the viewport and exports the material as OPAQUE.
+ * Console parsers and loose-texture archives are the opposite case: there is
+ * nothing authored to respect, so the heuristics are all we have.
+ */
+export function hasAuthoredMaterials(path: string) {
+  const ext = path.toLowerCase().split(".").pop() || "";
+  return ext === "glb" || ext === "gltf";
+}
+
 const SEMANTIC_TAGS = ["eye", "hair", "glass", "skin", "wood", "metal", "cloth", "face", "mouth", "tire", "wheel", "all", "body"];
 
 /**
@@ -169,7 +184,7 @@ export function applyMaterialFixes(
   model: THREE.Object3D,
   textures: TextureMap,
   textureLoader: THREE.TextureLoader,
-  options: { flipY?: boolean } = {}
+  options: { flipY?: boolean; respectAuthored?: boolean } = {}
 ) {
   const sortedTextureKeys = Object.keys(textures).sort((a, b) => b.length - a.length);
 
@@ -188,6 +203,7 @@ export function applyMaterialFixes(
       const wiiTexName = String(mat.userData.wiiTextureName || "").toLowerCase();
 
       // 1. UNIVERSAL WEIGHTED MATCHER
+      let assignedMap = false;
       if (!mat.map) {
         let bestKey = "";
         let bestScore = -1;
@@ -225,11 +241,19 @@ export function applyMaterialFixes(
           }
         }
 
-        if (bestKey && bestScore > 0) mat.map = textureLoader.load(textures[bestKey]);
+        if (bestKey && bestScore > 0) {
+          mat.map = textureLoader.load(textures[bestKey]);
+          assignedMap = true;
+        }
       }
 
       // 2. UNIVERSAL MATERIAL HEURISTICS
       if (!mat.map) return;
+
+      // A material the file itself authored is already correct; only the ones
+      // this pass had to guess a texture for need the heuristics below.
+      const isConsoleMaterial = mat.userData.wiiTextureName !== undefined;
+      if (options.respectAuthored && !isConsoleMaterial && !assignedMap) return;
 
       mat.color.set(0xffffff);
       mat.opacity = 1.0;
@@ -286,8 +310,7 @@ export function applyMaterialFixes(
 
       // Console parsers emit top-left UVs regardless of the container they
       // came from; everything else follows the caller's per-format convention.
-      const isConsoleMat = mat.userData.wiiTextureName !== undefined;
-      mat.map.flipY = isConsoleMat ? false : (options.flipY ?? false);
+      mat.map.flipY = isConsoleMaterial ? false : (options.flipY ?? false);
       mat.map.colorSpace = THREE.SRGBColorSpace;
       mat.map.minFilter = mat.map.magFilter = THREE.LinearFilter;
       mat.map.needsUpdate = true;
@@ -415,7 +438,11 @@ export interface SceneStats {
   textures: number;
 }
 
-/** Counts geometry and material usage across a subtree. */
+/**
+ * Counts geometry and material usage across a subtree. Hidden subtrees are
+ * skipped, so the HUD reports what the viewport shows — and what an export
+ * would therefore contain.
+ */
 export function collectStats(root: THREE.Object3D): SceneStats {
   const materials = new Set<unknown>();
   const textures = new Set<unknown>();
@@ -423,7 +450,9 @@ export function collectStats(root: THREE.Object3D): SceneStats {
   let triangles = 0;
   let vertices = 0;
 
-  root.traverse((child: any) => {
+  const visit = (child: any) => {
+    if (child !== root && !child.visible) return;
+    for (const grandchild of child.children) visit(grandchild);
     if (!child.isMesh || !child.geometry) return;
     meshes++;
     const geometry = child.geometry;
@@ -442,7 +471,8 @@ export function collectStats(root: THREE.Object3D): SceneStats {
         if (value && typeof value === "object" && "isTexture" in value) textures.add(value);
       }
     }
-  });
+  };
+  visit(root);
 
   return { meshes, triangles: Math.round(triangles), vertices, materials: materials.size, textures: textures.size };
 }

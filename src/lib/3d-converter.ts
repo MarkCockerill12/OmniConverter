@@ -433,6 +433,14 @@ export interface ExportOptions {
   maxTextureSize?: number;
   /** Apply Meshopt geometry compression (GLB only). */
   compress?: boolean;
+  /** Merge duplicate meshes, materials and textures (GLB only, lossless). */
+  dedup?: boolean;
+  /**
+   * Write nodes the graph marks invisible. The viewport prunes hidden subtrees
+   * itself (see `stageExport`) and keeps skeleton bones that a surviving skin
+   * needs, so it exports the pruned graph whole.
+   */
+  includeHidden?: boolean;
 }
 
 /** Serialises a Three.js object to GLB, GLTF, OBJ or STL. */
@@ -459,9 +467,13 @@ export async function exportModel(
     const { GLTFExporter } = await import("three/examples/jsm/exporters/GLTFExporter.js");
     const binary = target === "glb";
     await awaitTextures(object);
-    const result = await new GLTFExporter().parseAsync(object, { binary, includeCustomExtensions: true });
+    const result = await new GLTFExporter().parseAsync(object, {
+      binary,
+      includeCustomExtensions: true,
+      ...(options.includeHidden ? { onlyVisible: false } : {}),
+    });
 
-    if (binary && (options.maxTextureSize || options.compress)) {
+    if (binary && (options.maxTextureSize || options.compress || options.dedup)) {
       const { optimizeGlb } = await import("./3d-optimize");
       const optimised = await optimizeGlb(result as ArrayBuffer, options);
       return new Blob([optimised], { type: "model/gltf-binary" });
@@ -483,10 +495,12 @@ export async function exportModel(
 export async function convert3DModelHeadless(
   file: File,
   targetFormat: string,
-  nintendoWorker?: Worker | null
+  nintendoWorker?: Worker | null,
+  exportOptions: ExportOptions = {}
 ): Promise<Blob> {
   const THREE = await import("three");
-  const { createTextureResolver, applyMaterialFixes, disposeObject, flipYForModel } = await import("./3d-materials");
+  const { createTextureResolver, applyMaterialFixes, disposeObject, flipYForModel, hasAuthoredMaterials } =
+    await import("./3d-materials");
 
   const found = await discoverModels(file, { nintendoWorker });
   if (found.length === 0) {
@@ -521,19 +535,22 @@ export async function convert3DModelHeadless(
     }
     if (needsRepair) {
       const textureLoader = new THREE.TextureLoader(manager);
-      const flipY = flipYForModel(model.path);
-      applyMaterialFixes(object, model.textures, textureLoader, { flipY });
+      const fixOptions = {
+        flipY: flipYForModel(model.path),
+        respectAuthored: hasAuthoredMaterials(model.path),
+      };
+      applyMaterialFixes(object, model.textures, textureLoader, fixOptions);
       // Classifying a texture's alpha needs its pixels, and the loaders resolve
       // before their images decode. The viewport gets this from the manager's
       // onLoad; here a second pass over settled textures does the same job.
       await awaitTextures(object);
-      applyMaterialFixes(object, model.textures, textureLoader, { flipY });
+      applyMaterialFixes(object, model.textures, textureLoader, fixOptions);
     }
     root.add(object);
   }
 
   try {
-    return await exportModel(root, targetFormat);
+    return await exportModel(root, targetFormat, exportOptions);
   } finally {
     disposeObject(root);
     revokeTextures(textures);

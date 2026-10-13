@@ -5,12 +5,13 @@ import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
 import {
   ArrowRight, Box, CheckCircle2, CircleDashed, Download, Eye, EyeOff, Settings2,
-  Grid3x3, Focus, Layers2, Sparkles, Settings, Sun,
+  Grid3x3, Focus, Layers2, Sparkles, Settings, Sun, Move3d, Rotate3d, Scale3d,
+  AlignHorizontalDistributeCenter, Undo2, Proportions, AlertTriangle, Crosshair,
 } from "lucide-react";
 import { cn, is3DFile } from "@/lib/utils";
 import type { SceneNode, ThreeDViewerHandle } from "@/components/ui/three-viewer";
 import type { DisplayMode, SceneStats } from "@/lib/3d-materials";
-import type { Projection } from "@/hooks/use-three-scene";
+import type { GizmoMode, Projection } from "@/hooks/use-three-scene";
 import type { SelectedFile } from "@/components/converter/file-queue";
 import { AnimationBar, StatsBar, type AnimationClipInfo } from "@/components/converter/forge-hud";
 import { loadSetting, saveSetting } from "@/lib/storage";
@@ -37,6 +38,12 @@ const DISPLAY_MODES: { id: DisplayMode; label: string }[] = [
   { id: "wireframe", label: "Wire" },
   { id: "normals", label: "Normals" },
   { id: "uv", label: "UV" },
+];
+
+const GIZMO_MODES: { id: GizmoMode; label: string; Icon: typeof Move3d }[] = [
+  { id: "translate", label: "Move", Icon: Move3d },
+  { id: "rotate", label: "Rotate", Icon: Rotate3d },
+  { id: "scale", label: "Scale", Icon: Scale3d },
 ];
 
 const TEXTURE_CAPS = [
@@ -68,6 +75,10 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
   const [animationTime, setAnimationTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
   const [isExportOpen, setIsExportOpen] = useState(false);
+  const [gizmoMode, setGizmoMode] = useState<GizmoMode>("translate");
+  const [fitScale, setFitScale] = useState(true);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [compressExport, setCompressExport] = useState(false);
   const [maxTextureSize, setMaxTextureSize] = useState(0);
   const viewerRef = useRef<ThreeDViewerHandle>(null);
@@ -84,13 +95,14 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
   // Viewport preferences survive reloads.
   useEffect(() => {
     (async () => {
-      const saved = await loadSetting<{ theme?: string; displayMode?: DisplayMode; projection?: Projection; sidebarWidth?: number; unlit?: boolean }>("forge");
+      const saved = await loadSetting<{ theme?: string; displayMode?: DisplayMode; projection?: Projection; sidebarWidth?: number; unlit?: boolean; fitScale?: boolean }>("forge");
       if (!saved) return;
       const theme = VIEWPORT_THEMES.find(t => t.name === saved.theme);
       if (theme) setViewportTheme(theme);
       if (saved.displayMode) setDisplayMode(saved.displayMode);
       if (typeof saved.unlit === "boolean") { setUnlit(saved.unlit); setUnlitTouched(true); }
       if (saved.projection) setProjection(saved.projection);
+      if (typeof saved.fitScale === "boolean") setFitScale(saved.fitScale);
       if (saved.sidebarWidth) setSidebarWidth(saved.sidebarWidth);
     })();
   }, []);
@@ -103,9 +115,10 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
       displayMode,
       projection,
       sidebarWidth,
+      fitScale,
       ...(unlitTouched ? { unlit } : {}),
     });
-  }, [viewportTheme, displayMode, projection, sidebarWidth, unlit, unlitTouched]);
+  }, [viewportTheme, displayMode, projection, sidebarWidth, fitScale, unlit, unlitTouched]);
 
   const startResizing = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
@@ -135,6 +148,15 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
     document.body.style.userSelect = 'auto';
   }, []);
 
+  // Node ids are per-load uuids, so a new set of files invalidates the list.
+  useEffect(() => { setHiddenNodes([]); setSelectedModel(null); }, [signature]);
+
+  useEffect(() => {
+    if (!exportError) return;
+    const timer = setTimeout(() => setExportError(null), 7000);
+    return () => clearTimeout(timer);
+  }, [exportError]);
+
   const toggleNodeVisibility = (nodeId: string) => {
     setHiddenNodes(prev => prev.includes(nodeId) ? prev.filter(id => id !== nodeId) : [...prev, nodeId]);
   };
@@ -163,12 +185,18 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
     </div>
   ));
 
-  const exportModel = () => {
+  const exportModel = async () => {
     const preferredFormat = modelFiles.find(sf => sf.targetFormat)?.targetFormat || 'glb';
-    viewerRef.current?.exportGLB(preferredFormat, undefined, {
-      compress: compressExport,
-      maxTextureSize: maxTextureSize || undefined,
-    });
+    setExportError(null);
+    try {
+      await viewerRef.current?.exportGLB(preferredFormat, undefined, {
+        compress: compressExport,
+        maxTextureSize: maxTextureSize || undefined,
+      });
+    } catch (e) {
+      // An empty export used to download a 300-byte file with no explanation.
+      setExportError(e instanceof Error ? e.message : "Export failed.");
+    }
   };
 
   return (
@@ -245,6 +273,48 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
                     className="p-1.5 rounded-lg text-neutral-500 hover:text-white hover:bg-white/5 transition-all"
                   >
                     <Focus className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1 bg-neutral-900/80 px-2 py-2 rounded-xl border border-white/10 w-fit backdrop-blur-md shadow-2xl">
+                  <p className="text-[9px] text-neutral-500 font-black uppercase tracking-widest px-1">Compose</p>
+                  {GIZMO_MODES.map(({ id, label, Icon }) => (
+                    <button
+                      key={id}
+                      onClick={() => setGizmoMode(id)}
+                      title={`${label} the selected model (click a model in the viewport to select it)`}
+                      className={cn(
+                        "p-1.5 rounded-lg transition-all",
+                        gizmoMode === id ? "bg-purple-600 text-white" : "text-neutral-500 hover:text-white hover:bg-white/5"
+                      )}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                    </button>
+                  ))}
+                  <div className="w-px h-5 bg-white/10 mx-1" />
+                  <button
+                    onClick={() => viewerRef.current?.arrange()}
+                    title="Row the visible models up side by side"
+                    className="p-1.5 rounded-lg text-neutral-500 hover:text-white hover:bg-white/5 transition-all"
+                  >
+                    <AlignHorizontalDistributeCenter className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => viewerRef.current?.resetTransforms(selectedModel ? "selected" : "all")}
+                    title={selectedModel ? "Reset the selected model's transform" : "Reset every model's transform"}
+                    className="p-1.5 rounded-lg text-neutral-500 hover:text-white hover:bg-white/5 transition-all"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setFitScale(f => !f)}
+                    title={fitScale ? "Keep each model's authored scale" : "Normalise every model to the same size"}
+                    className={cn(
+                      "p-1.5 rounded-lg transition-all",
+                      fitScale ? "bg-purple-600 text-white" : "text-neutral-500 hover:text-white hover:bg-white/5"
+                    )}
+                  >
+                    <Proportions className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
@@ -354,11 +424,14 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
                 onAnimations={(list) => { setClips(list); setActiveClip(list[0]?.name ?? null); }}
                 onAnimationTime={setAnimationTime}
                 onConsoleModel={(isConsole) => { if (isConsole && !unlitTouched) setUnlit(true); }}
+                onSelection={setSelectedModel}
                 hiddenNodes={hiddenNodes}
                 backgroundColor={viewportTheme.color}
                 displayMode={displayMode}
                 unlit={unlit}
                 projection={projection}
+                gizmoMode={gizmoMode}
+                fitScale={fitScale}
                 activeClip={activeClip}
                 isPlaying={isPlaying}
               />
@@ -391,6 +464,21 @@ export function ForgePanel({ files, selected3DId, onSelect3D }: ForgePanelProps)
                 </button>
               ))}
             </div>
+
+            {selectedModel && (
+              <div className="absolute bottom-24 left-8 z-30 flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-600/90 backdrop-blur-xl border border-white/10 shadow-2xl pointer-events-none">
+                <Crosshair className="w-3.5 h-3.5 text-white" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-white truncate max-w-[240px]">{selectedModel}</span>
+                <span className="text-[9px] font-bold uppercase tracking-widest text-white/60">{gizmoMode} · Esc to drop</span>
+              </div>
+            )}
+
+            {exportError && (
+              <div className="absolute top-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-5 py-3 rounded-xl bg-[#e11d48] border border-white/10 shadow-2xl max-w-[90%]">
+                <AlertTriangle className="w-4 h-4 text-white shrink-0" />
+                <span className="text-[10px] font-black uppercase tracking-widest text-white">{exportError}</span>
+              </div>
+            )}
 
             <AnimationBar
               clips={clips}
