@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Crop as CropIcon, Scissors, Volume2, Check, Play, Pause, Box, FileArchive } from "lucide-react";
 import { EditorControls } from "./editor-controls";
-import { cn } from "@/lib/utils";
+import { cn, formatTime } from "@/lib/utils";
 import type { EditOptions, Preset } from "@/lib/formats";
 import { cssFilterFor, quarterTurns } from "@/lib/conversion/native";
 import Cropper, { Area } from "react-easy-crop";
@@ -42,6 +42,7 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
   const [zoom, setZoom] = useState(1);
   const [isCropping, setIsCropping] = useState(false);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
+  const [videoSize, setVideoSize] = useState({ width: 0, height: 0 });
 
   useEffect(() => {
     if (isOpen) {
@@ -83,9 +84,14 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
   }, []);
 
   // Live preview of the adjustments, composed the same way the engines apply them.
+  // A CSS rotation does not change the layout box, so a picture turned on its
+  // side is shrunk until its long edge fits where the short edge was.
+  const natural = type === 'image' ? imageSize : videoSize;
+  const sideways = quarterTurns(options) % 2 === 1 && natural.width > 0 && natural.height > 0;
+  const fit = sideways ? Math.min(natural.width / natural.height, natural.height / natural.width) : 1;
   const previewStyle = {
     filter: cssFilterFor(options),
-    transform: `scale(${options.flipH ? -1 : 1}, ${options.flipV ? -1 : 1}) rotate(${quarterTurns(options) * 90}deg)`,
+    transform: `scale(${(options.flipH ? -1 : 1) * fit}, ${(options.flipV ? -1 : 1) * fit}) rotate(${quarterTurns(options) * 90}deg)`,
   };
 
   const handleSave = () => {
@@ -118,31 +124,31 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
             className="relative w-full max-w-6xl bg-[#1f2228] border border-white/10 rounded-[2.5rem] shadow-3xl overflow-hidden flex flex-col max-h-[90vh]"
           >
             {/* Header */}
-            <div className="flex items-center justify-between p-6 border-b border-white/5 bg-black/20">
-              <div className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-[#e11d48]/10 rounded-xl flex items-center justify-center border border-[#e11d48]/20">
+            <div className="flex items-center justify-between gap-4 p-6 border-b border-white/5 bg-black/20">
+              <div className="flex items-center gap-4 min-w-0">
+                <div className="w-10 h-10 shrink-0 bg-[#e11d48]/10 rounded-xl flex items-center justify-center border border-[#e11d48]/20">
                   {type === 'image' && <CropIcon className="w-5 h-5 text-[#e11d48]" />}
                   {(type === 'video' || type === 'video-to-image') && <Scissors className="w-5 h-5 text-[#e11d48]" />}
                   {type === 'audio' && <Volume2 className="w-5 h-5 text-[#e11d48]" />}
                   {type === 'archive' && <FileArchive className="w-5 h-5 text-[#e11d48]" />}
                   {type === 'model' && <Box className="w-5 h-5 text-[#e11d48]" />}
                 </div>
-                <div>
-                  <h3 className="text-xl font-black uppercase tracking-tight italic">
+                <div className="min-w-0">
+                  <h3 className="text-xl font-black uppercase tracking-tight italic truncate">
                     {TITLES[type] ?? `${type.charAt(0).toUpperCase() + type.slice(1)} Editor`}
                   </h3>
-                  <p className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">{file.name}</p>
+                  <p className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest truncate">{file.name}</p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <button onClick={onClose} className="p-2.5 hover:bg-white/5 rounded-full transition-colors"><X className="w-6 h-6" /></button>
               </div>
             </div>
 
             {/* Content */}
-            <div className="flex-1 overflow-y-auto flex flex-col md:flex-row">
+            <div className="flex-1 min-h-0 overflow-y-auto md:overflow-hidden flex flex-col md:flex-row">
               {/* Preview Area */}
-              <div className="flex-[2] bg-[#0a0c10] flex flex-col items-center justify-center p-8 relative min-h-[400px]">
+              <div className="md:flex-1 min-w-0 shrink-0 md:shrink bg-[#0a0c10] flex flex-col items-center justify-center p-6 md:p-8 relative min-h-[320px] overflow-hidden">
                 {type === 'image' && previewUrl && (
                   <div className="relative w-full h-full flex items-center justify-center">
                     {isCropping ? (
@@ -186,15 +192,18 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                   </div>
                 )}
                 {(type === 'video' || type === 'video-to-image') && previewUrl && (
-                  <div className="w-full h-full flex flex-col gap-4">
-                    <div className="relative flex-1 flex items-center justify-center">
+                  <div className="w-full h-full min-h-0 flex flex-col gap-4">
+                    <div className="relative flex-1 min-h-0 flex items-center justify-center">
                       <video 
                         ref={videoRef}
                         src={previewUrl} 
-                        className="max-w-full max-h-full rounded-lg shadow-2xl"
+                        className="max-w-full max-h-[55vh] rounded-lg shadow-2xl"
                         style={type === 'video' ? previewStyle : undefined}
                         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+                        onLoadedMetadata={(e) => {
+                          setDuration(e.currentTarget.duration);
+                          setVideoSize({ width: e.currentTarget.videoWidth, height: e.currentTarget.videoHeight });
+                        }}
                       />
                       {type === 'video-to-image' && (
                          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -206,7 +215,7 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                     </div>
                     
                     {/* Video Controls */}
-                    <div className="bg-black/60 backdrop-blur-md rounded-2xl p-4 border border-white/5 flex flex-col gap-3">
+                    <div className="shrink-0 bg-black/60 backdrop-blur-md rounded-2xl p-4 border border-white/5 flex flex-col gap-3">
                        <div className="flex items-center gap-4">
                          <button 
                            onClick={() => {
@@ -218,20 +227,20 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                                setIsPlaying(false);
                              }
                            }}
-                           className="w-10 h-10 bg-[#e11d48] rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all"
+                           className="w-10 h-10 shrink-0 bg-[#e11d48] rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all"
                          >
                            {isPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
                          </button>
-                         <div className="flex-1 h-1.5 bg-white/10 rounded-full relative overflow-hidden group cursor-pointer" onClick={(e) => {
+                         <div className="flex-1 min-w-0 h-1.5 bg-white/10 rounded-full relative overflow-hidden group cursor-pointer" onClick={(e) => {
                             const rect = e.currentTarget.getBoundingClientRect();
                             const x = e.clientX - rect.left;
                             const pct = x / rect.width;
                             if (videoRef.current) videoRef.current.currentTime = pct * duration;
                          }}>
-                            <div className="absolute inset-y-0 left-0 bg-[#e11d48]" style={{ width: `${(currentTime/duration)*100}%` }} />
+                            <div className="absolute inset-y-0 left-0 bg-[#e11d48]" style={{ width: `${duration ? Math.min(100, (currentTime / duration) * 100) : 0}%` }} />
                          </div>
-                         <span className="text-[10px] font-mono font-bold text-neutral-400">
-                           {currentTime.toFixed(2)}s / {duration.toFixed(2)}s
+                         <span className="text-[10px] font-mono font-bold text-neutral-400 shrink-0 whitespace-nowrap">
+                           {formatTime(currentTime, 1)} / {formatTime(duration, 1)}
                          </span>
                        </div>
                     </div>
@@ -271,23 +280,23 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                          >
                            {isPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
                          </button>
-                         <div className="flex-1 h-1.5 bg-white/10 rounded-full relative overflow-hidden group cursor-pointer" onClick={(e) => {
+                         <div className="flex-1 min-w-0 h-1.5 bg-white/10 rounded-full relative overflow-hidden group cursor-pointer" onClick={(e) => {
                             const rect = e.currentTarget.getBoundingClientRect();
                             const x = e.clientX - rect.left;
                             const pct = x / rect.width;
                             if (audioRef.current) audioRef.current.currentTime = pct * duration;
                          }}>
-                            <div className="absolute inset-y-0 left-0 bg-[#e11d48]" style={{ width: `${(currentTime/duration)*100}%` }} />
+                            <div className="absolute inset-y-0 left-0 bg-[#e11d48]" style={{ width: `${duration ? Math.min(100, (currentTime / duration) * 100) : 0}%` }} />
                          </div>
-                         <span className="text-[10px] font-mono font-bold text-neutral-400 shrink-0">
-                           {currentTime.toFixed(2)}s / {duration.toFixed(2)}s
+                         <span className="text-[10px] font-mono font-bold text-neutral-400 shrink-0 whitespace-nowrap">
+                           {formatTime(currentTime, 1)} / {formatTime(duration, 1)}
                          </span>
                        </div>
                     </div>
                   </div>
                 )}
                 {(type === 'archive' || type === 'model') && (
-                  <div className="flex flex-col items-center gap-4 text-center">
+                  <div className="flex flex-col items-center gap-4 text-center min-w-0 max-w-full">
                     <div className="w-32 h-32 bg-[#e11d48]/10 rounded-[2rem] border border-[#e11d48]/20 flex items-center justify-center">
                       {type === 'archive' ? <FileArchive className="w-12 h-12 text-[#e11d48]" /> : <Box className="w-12 h-12 text-[#e11d48]" />}
                     </div>

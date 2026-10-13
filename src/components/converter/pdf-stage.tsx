@@ -104,6 +104,8 @@ interface PageStageProps {
   doc: PDFDocumentProxy | undefined;
   index: number;
   rotate: number;
+  /** Widest the page may be drawn, in CSS pixels. */
+  maxWidth: number;
   annotations: PdfAnnotation[];
   tool: PdfTool;
   color: string;
@@ -114,8 +116,8 @@ interface PageStageProps {
 }
 
 /** The working page: the rendered PDF with an interactive annotation layer on top. */
-export function PageStage({ doc, index, rotate, annotations, tool, color, selectedId, onSelect, onAdd, onMove }: PageStageProps) {
-  const { canvasRef, size } = usePageRender(doc, index, 720);
+export function PageStage({ doc, index, rotate, maxWidth, annotations, tool, color, selectedId, onSelect, onAdd, onMove }: PageStageProps) {
+  const { canvasRef, size } = usePageRender(doc, index, maxWidth);
   const { scale } = size;
   const drag = useRef<{ mode: "move" | "box" | "ink"; id?: string; last: Point } | null>(null);
   const [box, setBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);

@@ -58,14 +58,14 @@ export function PdfEditorRail({
     patchPdf({ watermark: { text: "", opacity: 0.2, size: 64, color: "#e11d48", ...mark, ...next } });
 
   return (
-    <div className="border-l border-white/5 p-8 space-y-10 w-[400px] shrink-0 bg-[#1a1d23] overflow-y-auto">
+    <div className="border-l border-white/5 p-6 xl:p-8 space-y-10 w-[320px] xl:w-[400px] shrink-0 bg-[#1a1d23] overflow-y-auto">
       <EditorSection title="Tools" icon={<PenLine className="w-4 h-4" />}>
         <div className="space-y-4">
           <div className="grid grid-cols-3 gap-2">
             {TOOLS.map((t) => (
-              <GhostButton key={t.id} active={tool === t.id} onClick={() => setTool(t.id)}>{t.icon} {t.label}</GhostButton>
+              <GhostButton key={t.id} stacked active={tool === t.id} onClick={() => setTool(t.id)}>{t.icon} {t.label}</GhostButton>
             ))}
-            <GhostButton onClick={() => imageInput.current?.click()} title="Place a picture or a scanned signature">
+            <GhostButton stacked onClick={() => imageInput.current?.click()} title="Place a picture or a scanned signature">
               <ImagePlus className="w-4 h-4" /> Image
             </GhostButton>
           </div>
@@ -74,7 +74,7 @@ export function PdfEditorRail({
             onChange={(e) => { const f = e.target.files?.[0]; if (f) onAddImage(f); e.target.value = ""; }}
           />
           <div className="flex items-center gap-3">
-            <input type="color" aria-label="Colour" className="w-10 h-10 rounded-lg bg-transparent cursor-pointer" value={color} onChange={(e) => setColor(e.target.value)} />
+            <input type="color" aria-label="Colour" className="w-10 h-10 shrink-0 rounded-lg bg-transparent cursor-pointer" value={color} onChange={(e) => setColor(e.target.value)} />
             <p className={HINT_CLASS}>
               {tool === "rect" ? "Cover hides what is under it but does not delete the hidden text from the file."
                 : tool === "text" ? "Click the page to place text, then edit it below."
@@ -106,7 +106,7 @@ export function PdfEditorRail({
               )}
               {selected.type !== "image" && (
                 <div className="flex items-center gap-3">
-                  <input type="color" aria-label="Item colour" className="w-10 h-10 rounded-lg bg-transparent cursor-pointer" value={selected.color ?? "#000000"} onChange={(e) => updateSelected({ color: e.target.value })} />
+                  <input type="color" aria-label="Item colour" className="w-10 h-10 shrink-0 rounded-lg bg-transparent cursor-pointer" value={selected.color ?? "#000000"} onChange={(e) => updateSelected({ color: e.target.value })} />
                   <span className={LABEL_CLASS}>Item colour</span>
                 </div>
               )}
@@ -148,7 +148,7 @@ export function PdfEditorRail({
               const set = (next: string | boolean) => patchPdf({ fields: { ...pdf.fields, [field.name]: next } });
               if (field.kind === "checkbox") return <Toggle key={field.name} label={field.name} checked={!!value} onChange={set} />;
               return (
-                <div key={field.name} className="space-y-1.5">
+                <div key={field.name} className="space-y-1.5 min-w-0">
                   <label className={LABEL_CLASS}>{field.name}</label>
                   {field.kind === "choice" ? (
                     <select aria-label={field.name} className={FIELD_CLASS} value={String(value)} onChange={(e) => set(e.target.value)}>

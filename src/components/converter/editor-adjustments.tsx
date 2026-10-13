@@ -3,7 +3,7 @@
 import { Archive, FlipHorizontal2, FlipVertical2, Minimize2, RotateCcw, RotateCw, SlidersHorizontal, Waves } from "lucide-react";
 import { getFileCategory, type CompressionLevel, type EditOptions } from "@/lib/formats";
 import { COMPRESSION_LEVELS, describeCompression } from "@/lib/compression";
-import { Choice, EditorSection, FIELD_CLASS, GhostButton, HINT_CLASS, LABEL_CLASS, Slider, Toggle } from "./editor-parts";
+import { Choice, EditorSection, GhostButton, HINT_CLASS, Slider, TimeField, Toggle } from "./editor-parts";
 
 type Patch = (next: Partial<EditOptions>) => void;
 
@@ -19,12 +19,14 @@ export function CompressionSection({ options, patch, fileName, targetFormat }: S
   return (
     <EditorSection title="Compression" icon={<Minimize2 className="w-4 h-4" />}>
       <div className="space-y-3">
-        <Choice<CompressionLevel | "off">
-          columns={5}
-          value={options.compression ?? "off"}
-          options={[{ id: "off", label: "Off" }, ...COMPRESSION_LEVELS]}
+        {/* "Off" on its own row, the four levels as a 2x2 block: fits the narrowest rail. */}
+        <Choice columns={1} value={options.compression ? undefined : "off"} options={[{ id: "off", label: "Off" }]} onChange={() => patch({ compression: undefined })} />
+        <Choice<CompressionLevel>
+          columns={2}
+          value={options.compression}
+          options={COMPRESSION_LEVELS}
           // A level owns the quality settings until one is moved by hand again.
-          onChange={(level) => patch({ compression: level === "off" ? undefined : level, quality: undefined, audioBitrate: undefined })}
+          onChange={(compression) => patch({ compression, quality: undefined, audioBitrate: undefined })}
         />
         <p className={HINT_CLASS} data-omni="compression-hint">{describeCompression(category, target, options.compression)}</p>
       </div>
@@ -88,15 +90,7 @@ export function AdjustSection({ options, patch }: SectionProps) {
 /** Gain, fades and loudness for audio, and for the soundtrack of a video. */
 export function AudioFxSection({ options, patch, isVideo }: SectionProps & { isVideo: boolean }) {
   const seconds = (key: "fadeIn" | "fadeOut", label: string) => (
-    <div className="space-y-1.5">
-      <label className={LABEL_CLASS}>{label}</label>
-      <input
-        type="number" min={0} step={0.1} aria-label={label}
-        className={FIELD_CLASS}
-        value={options[key] ?? 0}
-        onChange={(e) => patch({ [key]: Math.max(0, parseFloat(e.target.value)) || undefined })}
-      />
-    </div>
+    <TimeField label={label} value={options[key] ?? 0} onChange={(value) => patch({ [key]: value || undefined })} />
   );
   return (
     <EditorSection title="Sound" icon={<Waves className="w-4 h-4" />}>
@@ -106,8 +100,8 @@ export function AudioFxSection({ options, patch, isVideo }: SectionProps & { isV
           <>
             <Slider label="Volume" min={0} max={300} step={5} suffix="%" value={options.volume ?? 100} onChange={(volume) => patch({ volume: volume === 100 ? undefined : volume })} />
             <div className="grid grid-cols-2 gap-3">
-              {seconds("fadeIn", "Fade in (s)")}
-              {seconds("fadeOut", "Fade out (s)")}
+              {seconds("fadeIn", "Fade in")}
+              {seconds("fadeOut", "Fade out")}
             </div>
             <Toggle label="Normalise loudness" checked={!!options.normalize} onChange={(on) => patch({ normalize: on || undefined })} />
             <Toggle label="Mix down to mono" checked={!!options.mono} onChange={(on) => patch({ mono: on || undefined })} />

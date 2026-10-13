@@ -5,10 +5,10 @@ import {
   Crop as CropIcon, Scissors, Monitor, Volume2, Check, Maximize2, Palette, Droplets,
   Gauge, Sparkles, Subtitles, Ruler,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, formatTime } from "@/lib/utils";
 import { PRESETS, parseSubtitles, getFileCategory, type EditOptions, type Preset } from "@/lib/formats";
 import type { EditorType } from "./media-editors";
-import { EditorSection } from "./editor-parts";
+import { EditorSection, TimeField } from "./editor-parts";
 import { AdjustSection, AudioFxSection, CompressionSection, PackLevelSection } from "./editor-adjustments";
 
 interface EditorControlsProps {
@@ -50,7 +50,7 @@ export function EditorControls({
   };
 
   return (
-    <div className="flex-1 border-l border-white/5 p-8 space-y-10 min-w-[380px] bg-[#1a1d23]">
+    <div className="w-full md:w-[400px] md:shrink-0 md:overflow-y-auto border-t md:border-t-0 md:border-l border-white/5 p-6 md:p-8 space-y-10 bg-[#1a1d23]">
       {presets.length > 0 && (
         <EditorSection title="Presets" icon={<Sparkles className="w-4 h-4" />}>
           <div className="grid grid-cols-2 gap-2">
@@ -59,9 +59,9 @@ export function EditorControls({
                 key={preset.id}
                 onClick={() => onApplyPreset(preset)}
                 title={preset.hint}
-                className="px-3 py-3 rounded-xl border border-white/10 bg-black/40 hover:bg-white/10 hover:border-white/20 transition-all text-left group"
+                className="px-3 py-3 min-w-0 rounded-xl border border-white/10 bg-black/40 hover:bg-white/10 hover:border-white/20 transition-all text-left group"
               >
-                <p className="text-[10px] font-black uppercase tracking-widest text-white group-hover:text-[#e11d48] transition-colors">{preset.label}</p>
+                <p className="text-[10px] font-black uppercase tracking-wide text-white group-hover:text-[#e11d48] transition-colors truncate">{preset.label}</p>
                 <p className="text-[8px] font-bold text-neutral-500 uppercase tracking-tight mt-1 truncate">{preset.hint}</p>
               </button>
             ))}
@@ -110,7 +110,7 @@ export function EditorControls({
                      <input
                        type="text"
                        placeholder="HEX (e.g. #FFFFFF)"
-                       className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors uppercase"
+                       className="flex-1 min-w-0 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors uppercase"
                        value={options.transparencyColor || ""}
                        onChange={(e) => patch({ transparencyColor: e.target.value })}
                      />
@@ -162,13 +162,13 @@ export function EditorControls({
 
                 {options.crop && !isCropping && (
                    <div className="grid grid-cols-2 gap-2">
-                      <div className="p-3 bg-black/40 rounded-xl border border-white/5">
+                      <div className="p-3 min-w-0 bg-black/40 rounded-xl border border-white/5">
                          <p className="text-[8px] font-black text-neutral-500 uppercase mb-1">Position</p>
-                         <p className="text-[10px] font-mono font-bold text-white">{options.crop.x}, {options.crop.y}</p>
+                         <p className="text-[10px] font-mono font-bold text-white truncate">{Math.round(options.crop.x)}, {Math.round(options.crop.y)}</p>
                       </div>
-                      <div className="p-3 bg-black/40 rounded-xl border border-white/5">
+                      <div className="p-3 min-w-0 bg-black/40 rounded-xl border border-white/5">
                          <p className="text-[8px] font-black text-neutral-500 uppercase mb-1">Dimensions</p>
-                         <p className="text-[10px] font-mono font-bold text-white">{options.crop.width} x {options.crop.height}</p>
+                         <p className="text-[10px] font-mono font-bold text-white truncate">{Math.round(options.crop.width)} x {Math.round(options.crop.height)}</p>
                       </div>
                    </div>
                 )}
@@ -253,7 +253,7 @@ export function EditorControls({
               <div className="space-y-4">
                  <div className="p-6 bg-[#e11d48]/10 border border-[#e11d48]/20 rounded-2xl">
                     <p className="text-[10px] font-bold text-[#e11d48] uppercase tracking-widest mb-1">Selected Moment:</p>
-                    <p className="text-3xl font-black italic">{currentTime.toFixed(3)}s</p>
+                    <p className="text-3xl font-black italic font-mono truncate">{formatTime(currentTime, 3)}</p>
                  </div>
                  <button
                    onClick={() => patch({ frameTimestamp: currentTime })}
@@ -265,29 +265,13 @@ export function EditorControls({
            ) : (
               <div className="space-y-6">
                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                       <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">Start (s)</label>
-                       <input
-                         type="number"
-                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors"
-                         value={options.trimStart || 0}
-                         onChange={(e) => patch({ trimStart: parseFloat(e.target.value) })}
-                       />
-                    </div>
-                    <div className="space-y-1.5">
-                       <label className="text-[10px] font-black uppercase tracking-widest text-neutral-500">End (s)</label>
-                       <input
-                         type="number"
-                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs font-bold outline-none focus:border-[#e11d48] transition-colors"
-                         value={options.trimEnd || duration}
-                         onChange={(e) => patch({ trimEnd: parseFloat(e.target.value) })}
-                       />
-                    </div>
+                    <TimeField label="Start" value={options.trimStart || 0} onChange={(trimStart) => patch({ trimStart })} />
+                    <TimeField label="End" value={options.trimEnd || duration} onChange={(trimEnd) => patch({ trimEnd })} />
                  </div>
-                 <div className="p-4 bg-white/5 rounded-2xl border border-white/5 flex items-center justify-between">
+                 <div className="p-4 bg-white/5 rounded-2xl border border-white/5 flex items-center justify-between gap-3">
                     <p className="text-[10px] font-bold text-neutral-500 uppercase">Duration</p>
-                    <p className="text-sm font-black text-[#e11d48]">
-                       {((options.trimEnd || duration) - (options.trimStart || 0)).toFixed(2)}s
+                    <p className="text-sm font-black font-mono text-[#e11d48]">
+                       {formatTime(Math.max(0, (options.trimEnd || duration) - (options.trimStart || 0)), 2)}
                     </p>
                  </div>
               </div>
@@ -376,7 +360,7 @@ export function EditorControls({
               </button>
               {options.subtitles?.length ? (
                 <div className="p-3 bg-black/40 rounded-xl border border-white/5 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="text-[10px] font-bold text-white truncate">{options.subtitleName}</p>
                     <p className="text-[8px] font-black uppercase tracking-widest text-neutral-500">{options.subtitles.length} cues</p>
                   </div>

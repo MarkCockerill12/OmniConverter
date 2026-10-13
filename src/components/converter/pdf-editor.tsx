@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { CircleDashed, FileText, Lock, X } from "lucide-react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
@@ -39,6 +39,20 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const { attachments, openPassword } = pdf;
+
+  // The page is drawn to fit the pane (in 40px steps, so dragging the window
+  // edge does not re-render the PDF on every pixel).
+  const paneRef = useRef<HTMLDivElement>(null);
+  const [pageWidth, setPageWidth] = useState(720);
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    const measure = () => setPageWidth(Math.max(240, Math.min(720, Math.floor((pane.clientWidth - 64) / 40) * 40)));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, []);
 
   // Open the file and everything merged into it for previewing.
   useEffect(() => {
@@ -209,7 +223,7 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
         </div>
 
         <div className="flex-1 min-h-0 flex">
-          <div className="w-32 shrink-0 border-r border-white/5 overflow-y-auto p-3 space-y-2 bg-black/20">
+          <div className="w-32 shrink-0 border-r border-white/5 overflow-y-auto overflow-x-hidden p-3 space-y-2 bg-black/20">
             {status === "ready" && pages.map((page, i) => (
               <PageThumb
                 key={page.key} doc={docs[page.source]} index={page.index} rotate={page.rotate} label={i + 1}
@@ -219,10 +233,10 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
             ))}
           </div>
 
-          <div className="flex-1 min-w-0 bg-[#0a0c10] overflow-auto p-8 flex flex-col items-center gap-4">
-            {message && status === "ready" && <p className="text-[10px] font-black uppercase tracking-widest text-[#e11d48]">{message}</p>}
+          <div ref={paneRef} className="flex-1 min-w-0 bg-[#0a0c10] overflow-auto [scrollbar-color:#374151_transparent] p-8 flex flex-col gap-4">
+            {message && status === "ready" && <p className="text-[10px] font-black uppercase tracking-widest text-[#e11d48] text-center break-words">{message}</p>}
             {status === "loading" && <CircleDashed className="w-8 h-8 text-[#e11d48] animate-spin m-auto" />}
-            {status === "error" && <p className="m-auto text-sm font-bold text-[#e11d48]">{message}</p>}
+            {status === "error" && <p className="m-auto text-sm font-bold text-[#e11d48] text-center break-words max-w-full">{message}</p>}
             {status === "locked" && (
               <form
                 className="m-auto w-full max-w-sm space-y-4 text-center"
@@ -239,11 +253,15 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
               </form>
             )}
             {status === "ready" && active && (
+              // Auto margins centre the page yet keep its left edge reachable
+              // when it is wider than the pane and the pane scrolls.
+              <div className="m-auto w-fit">
               <PageStage
                 key={active.key}
                 doc={docs[active.source]}
                 index={active.index}
                 rotate={active.rotate}
+                maxWidth={pageWidth}
                 annotations={annotations.filter((ann) => ann.page === active.key)}
                 tool={tool}
                 color={color}
@@ -252,6 +270,7 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
                 onAdd={addAnnotation}
                 onMove={moveAnnotation}
               />
+              </div>
             )}
           </div>
 

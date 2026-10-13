@@ -21,6 +21,25 @@ export function stripExtension(fileName: string) {
   return lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
 }
 
+/** Seconds as m:ss (or h:mm:ss), with optional fractional digits: 75.5 -> "1:15.5". */
+export function formatTime(seconds: number, decimals = 0) {
+  const total = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  // Round first so 59.99 becomes 1:00.0 rather than 0:60.0.
+  const rounded = Number(total.toFixed(decimals));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const rest = (rounded % 60).toFixed(decimals).padStart(decimals ? decimals + 3 : 2, "0");
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
+}
+
+/** Reads "90", "1:30" or "1:02:03.5" as seconds; null when it is not a time. */
+export function parseTime(text: string): number | null {
+  const parts = text.trim().split(":");
+  if (parts.length === 0 || parts.length > 3 || parts.some((p) => p === "" || !/^\d*\.?\d*$/.test(p))) return null;
+  const value = parts.reduce((sum, part) => sum * 60 + Number(part), 0);
+  return Number.isFinite(value) ? value : null;
+}
+
 /** Triggers a browser download for a Blob and releases the object URL afterwards. */
 export function downloadBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
