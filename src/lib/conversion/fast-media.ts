@@ -1,4 +1,6 @@
 import type { EditOptions } from "@/lib/formats";
+import { needsLosslessVideo, pcmShapeFor } from "@/lib/compression";
+import { cssFilterFor, quarterTurns } from "./native";
 
 /**
  * WebCodecs fast lane.
@@ -23,6 +25,12 @@ export function fastLaneSupports(sourceExt: string, targetExt: string, options: 
   if (options.transparencyColor) return false;
   // Playback-rate changes need a filter graph too.
   if (options.speed && options.speed !== 1) return false;
+  // Gain, fades and loudness normalisation are FFmpeg audio filters.
+  if ((options.volume ?? 100) !== 100 || options.fadeIn || options.fadeOut || options.normalize) return false;
+  // Hardware encoders have no lossless mode.
+  if (needsLosslessVideo(targetExt, options) && !AUDIO_ONLY.has(targetExt)) return false;
+  // Mediabunny rotates before cropping, the other engines crop first.
+  if (options.crop && options.rotate) return false;
   return true;
 }
 
@@ -59,11 +67,13 @@ const OUTPUT_MIME: Record<string, string> = {
 };
 
 /**
- * Draws subtitle cues straight onto decoded frames. FFmpeg.wasm's core carries
- * no libass, so burn-in happens here on a canvas instead.
+ * Per-frame canvas pass: colour filters, mirroring and subtitle cues. FFmpeg.wasm's
+ * core carries no libass, so burn-in happens here on a canvas instead.
  */
-function buildSubtitleRenderer(cues: NonNullable<EditOptions["subtitles"]>) {
+function buildFrameProcessor(options: EditOptions) {
   let canvas: OffscreenCanvas | null = null;
+  const cues = options.subtitles ?? [];
+  const filter = cssFilterFor(options);
 
   return (sample: { timestamp: number; displayWidth: number; displayHeight: number; toCanvasImageSource: () => CanvasImageSource }) => {
     const width = sample.displayWidth;
@@ -73,7 +83,12 @@ function buildSubtitleRenderer(cues: NonNullable<EditOptions["subtitles"]>) {
     if (!ctx) return sample.toCanvasImageSource();
 
     ctx.clearRect(0, 0, width, height);
+    ctx.save();
+    ctx.filter = filter;
+    ctx.translate(options.flipH ? width : 0, options.flipV ? height : 0);
+    ctx.scale(options.flipH ? -1 : 1, options.flipV ? -1 : 1);
     ctx.drawImage(sample.toCanvasImageSource(), 0, 0, width, height);
+    ctx.restore();
 
     const cue = cues.find((c) => sample.timestamp >= c.start && sample.timestamp <= c.end);
     if (cue) {
@@ -151,14 +166,33 @@ export async function convertMediaFast(
       }
     }
     if (options.fps) video.frameRate = options.fps;
-    if (options.videoBitrate) video.quality = new mb.Quality({ bitrate: options.videoBitrate });
-    if (options.subtitles?.length) video.process = buildSubtitleRenderer(options.subtitles);
+    const turns = quarterTurns(options);
+    if (turns) {
+      video.rotate = turns * 90;
+      video.allowRotationMetadata = false;
+    }
+    if (options.videoBitrate) {
+      video.quality = new mb.Quality({ bitrate: options.videoBitrate });
+    } else if (options.compression && options.compression !== "lossless") {
+      video.quality = { balanced: mb.QUALITY_MEDIUM, small: mb.QUALITY_LOW, smallest: mb.QUALITY_VERY_LOW }[options.compression];
+      // Without this a compatible track is copied across at its original size.
+      video.forceTranscode = true;
+    }
+    if (options.subtitles?.length || options.flipH || options.flipV || cssFilterFor(options) !== "none") {
+      video.process = buildFrameProcessor(options);
+    }
   }
 
-  const audio: Record<string, unknown> = {};
+  const audio: Record<string, unknown> = options.mute && !audioOnly ? { discard: true } : {};
   if (options.audioBitrate) {
     const bits = parseInt(options.audioBitrate, 10) * 1000;
     if (Number.isFinite(bits) && bits > 0) audio.quality = new mb.Quality({ bitrate: bits });
+  }
+  if (options.mono) audio.numberOfChannels = 1;
+  if (options.compression) {
+    const { sampleRate } = pcmShapeFor(lower, options.compression);
+    if (sampleRate) audio.sampleRate = sampleRate;
+    audio.forceTranscode = true;
   }
 
   const trim: { start?: number; end?: number } = {};

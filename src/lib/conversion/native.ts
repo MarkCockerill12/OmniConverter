@@ -1,4 +1,5 @@
 import type { EditOptions } from "@/lib/formats";
+import { colorBitsFor } from "@/lib/compression";
 
 /**
  * Native browser conversions — canvas and WebAudio only.
@@ -39,11 +40,47 @@ function canvasToBlob(canvas: HTMLCanvasElement, mime: string, quality?: number)
   );
 }
 
-/** Applies crop, then explicit resolution or percentage scaling. */
+/** Number of clockwise quarter turns requested, 0-3. */
+export function quarterTurns(options: EditOptions) {
+  return ((Math.round((options.rotate ?? 0) / 90) % 4) + 4) % 4;
+}
+
+/** The colour adjustments as a CSS/canvas filter string ("none" when untouched). */
+export function cssFilterFor(options: EditOptions) {
+  const parts: string[] = [];
+  if (options.brightness !== undefined && options.brightness !== 100) parts.push(`brightness(${options.brightness}%)`);
+  if (options.contrast !== undefined && options.contrast !== 100) parts.push(`contrast(${options.contrast}%)`);
+  if (options.saturation !== undefined && options.saturation !== 100) parts.push(`saturate(${options.saturation}%)`);
+  if (options.grayscale) parts.push("grayscale(100%)");
+  if (options.blur) parts.push(`blur(${options.blur}px)`);
+  return parts.length ? parts.join(" ") : "none";
+}
+
+/** Rounds every colour channel to `bits` bits so the PNG deflates better. */
+function reduceColorDepth(canvas: HTMLCanvasElement, bits: number) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx || bits >= 8) return;
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const steps = (1 << bits) - 1;
+  const lut = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) lut[i] = Math.round((Math.round((i / 255) * steps) / steps) * 255);
+  const data = image.data;
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = lut[data[i]];
+    data[i + 1] = lut[data[i + 1]];
+    data[i + 2] = lut[data[i + 2]];
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+/** Applies crop, rotation, flips and colour filters, then resolution or percentage scaling. */
 function drawToCanvas(img: CanvasImageSource, natural: { width: number; height: number }, options: EditOptions = {}) {
   const crop = options.crop;
-  const sourceW = crop?.width || natural.width;
-  const sourceH = crop?.height || natural.height;
+  const turns = quarterTurns(options);
+  const sideways = turns % 2 === 1;
+  // Sizes below describe the picture after rotation.
+  const sourceW = sideways ? crop?.height || natural.height : crop?.width || natural.width;
+  const sourceH = sideways ? crop?.width || natural.width : crop?.height || natural.height;
 
   let targetW = sourceW;
   let targetH = sourceH;
@@ -71,12 +108,21 @@ function drawToCanvas(img: CanvasImageSource, natural: { width: number; height: 
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D context unavailable.");
   ctx.imageSmoothingQuality = "high";
+  ctx.filter = cssFilterFor(options);
 
+  // Draw centred so rotation and mirroring pivot on the middle of the frame.
+  const drawW = sideways ? canvas.height : canvas.width;
+  const drawH = sideways ? canvas.width : canvas.height;
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.scale(options.flipH ? -1 : 1, options.flipV ? -1 : 1);
+  ctx.rotate((turns * Math.PI) / 2);
   if (crop) {
-    ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, crop.x, crop.y, crop.width, crop.height, -drawW / 2, -drawH / 2, drawW, drawH);
   } else {
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
   }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.filter = "none";
   return canvas;
 }
 
@@ -87,6 +133,7 @@ export async function convertImageNative(file: File, target: string, options: Ed
   const img = await loadImage(file, file.name.toLowerCase().endsWith(".svg") ? "image/svg+xml" : undefined);
   const natural = { width: img.naturalWidth || 1024, height: img.naturalHeight || 1024 };
   const canvas = drawToCanvas(img, natural, options);
+  if (options.compression) reduceColorDepth(canvas, colorBitsFor(target, options.compression));
   return canvasToBlob(canvas, mime, (options.quality ?? 92) / 100);
 }
 

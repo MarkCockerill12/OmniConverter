@@ -25,7 +25,90 @@ export interface SubtitleCue {
   text: string;
 }
 
+/**
+ * How hard to squeeze the output. "lossless" never changes the content;
+ * the three lossy steps trade quality for size. See `lib/compression.ts`.
+ */
+export type CompressionLevel = "lossless" | "balanced" | "small" | "smallest";
+
+/** One page of the edited PDF: which source document it comes from, and how it is turned. */
+export interface PdfPageRef {
+  key: string;
+  /** 0 is the queued file; 1+ index into `PdfEdits.attachments`. */
+  source: number;
+  index: number;
+  /** Extra clockwise rotation in degrees, on top of the page's own. */
+  rotate: number;
+}
+
+/**
+ * Something drawn onto a PDF page. Coordinates are in PDF points, measured from
+ * the top-left of the page as it is displayed before any extra rotation.
+ */
+export interface PdfAnnotation {
+  id: string;
+  page: string;
+  type: "text" | "highlight" | "rect" | "ink" | "image";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text?: string;
+  size?: number;
+  color?: string;
+  opacity?: number;
+  /** Ink strokes, as point lists in the same coordinate space. */
+  strokes?: { x: number; y: number }[][];
+  strokeWidth?: number;
+  image?: Blob;
+}
+
+export interface PdfEdits {
+  pages?: PdfPageRef[];
+  /** Extra PDFs or images merged in; referenced by `PdfPageRef.source`. */
+  attachments?: File[];
+  annotations?: PdfAnnotation[];
+  /** Form field values by field name. */
+  fields?: Record<string, string | boolean>;
+  flattenForm?: boolean;
+  watermark?: { text: string; opacity: number; size: number; color: string };
+  pageNumbers?: boolean;
+  metadata?: { title?: string; author?: string; subject?: string; keywords?: string };
+  stripMetadata?: boolean;
+  /** Password needed to open the source, when it is encrypted. */
+  openPassword?: string;
+  /** Encrypt the output with this password. */
+  protectPassword?: string;
+  /** Write one PDF per page (delivered as a ZIP). */
+  split?: boolean;
+}
+
 export interface EditOptions {
+  compression?: CompressionLevel;
+  /** Deflate effort for ZIP/GZ output, 0 (store) to 9. */
+  archiveLevel?: number;
+  /** Clockwise rotation in 90 degree steps. */
+  rotate?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  /** Percentages, 100 = unchanged. */
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  /** Gaussian blur radius in pixels. */
+  blur?: number;
+  grayscale?: boolean;
+  /** Audio gain as a percentage, 100 = unchanged. */
+  volume?: number;
+  fadeIn?: number;
+  fadeOut?: number;
+  normalize?: boolean;
+  mono?: boolean;
+  /** Drop the audio track from a video. */
+  mute?: boolean;
+  /** Output length in seconds, filled in by the router to place the fade-out. */
+  clipDuration?: number;
+  pdf?: PdfEdits;
   trimStart?: number;
   trimEnd?: number;
   crop?: { x: number; y: number; width: number; height: number };
@@ -86,7 +169,12 @@ export function allowedTargets(fileName: string): Partial<Record<Category, strin
         ? { "3D Model": MODEL_TARGETS, "Archive": ARCHIVE_TARGETS }
         : { "Archive": ARCHIVE_TARGETS, "3D Model": MODEL_TARGETS };
     case "Document":
-      return ext === "pdf" ? { "Image": RASTER_TARGETS, "Document": ["TXT"] } : {};
+      if (ext === "pdf") return { "Document": ["PDF", "TXT", "DOCX"], "Image": RASTER_TARGETS };
+      if (ext === "docx") return { "Document": ["PDF", "TXT", "MD"] };
+      if (ext === "txt" || ext === "md" || ext === "rtf") {
+        return { "Document": ["PDF", "DOCX", "TXT", "MD"].filter((t) => t.toLowerCase() !== ext) };
+      }
+      return {}; // legacy binary .doc has no client-side reader
     default:
       return {};
   }
@@ -158,6 +246,22 @@ export const PRESETS: Preset[] = [
     target: "MP3",
     categories: ["Video", "Audio"],
     options: { audioBitrate: "128k" },
+  },
+  {
+    id: "shrink-video",
+    label: "Shrink video",
+    hint: "Same picture, smaller MP4",
+    target: "MP4",
+    categories: ["Video"],
+    options: { compression: "small" },
+  },
+  {
+    id: "archive-audio",
+    label: "Archive FLAC",
+    hint: "Lossless, about half of WAV",
+    target: "FLAC",
+    categories: ["Audio"],
+    options: { compression: "lossless" },
   },
   {
     id: "web-image",

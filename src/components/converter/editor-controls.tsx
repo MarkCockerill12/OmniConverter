@@ -8,13 +8,15 @@ import {
 import { cn } from "@/lib/utils";
 import { PRESETS, parseSubtitles, getFileCategory, type EditOptions, type Preset } from "@/lib/formats";
 import type { EditorType } from "./media-editors";
+import { EditorSection } from "./editor-parts";
+import { AdjustSection, AudioFxSection, CompressionSection, PackLevelSection } from "./editor-adjustments";
 
 interface EditorControlsProps {
   type: EditorType;
   fileName: string;
   targetFormat: string;
   options: EditOptions;
-  setOptions: (options: EditOptions) => void;
+  setOptions: React.Dispatch<React.SetStateAction<EditOptions>>;
   currentTime: number;
   duration: number;
   isCropping: boolean;
@@ -35,9 +37,11 @@ export function EditorControls({
   const subtitleInput = useRef<HTMLInputElement>(null);
   const category = getFileCategory(fileName);
   const presets = PRESETS.filter((p) => p.categories.includes(category));
-  const showQuality = type !== "audio" && (!targetFormat || LOSSY_TARGETS.includes(targetFormat.toUpperCase()));
+  const isVisual = type === "image" || type === "video" || type === "video-to-image";
+  const showQuality = isVisual && (!targetFormat || LOSSY_TARGETS.includes(targetFormat.toUpperCase()));
 
-  const patch = (next: Partial<EditOptions>) => setOptions({ ...options, ...next });
+  // Merged into the latest state, so two changes in the same tick both land.
+  const patch = (next: Partial<EditOptions>) => setOptions((prev) => ({ ...prev, ...next }));
 
   const loadSubtitles = async (file: File) => {
     const cues = parseSubtitles(await file.text());
@@ -64,6 +68,14 @@ export function EditorControls({
           </div>
         </EditorSection>
       )}
+
+      {type === 'archive' ? (
+        <PackLevelSection options={options} patch={patch} targetFormat={targetFormat} />
+      ) : (
+        <CompressionSection options={options} patch={patch} fileName={fileName} targetFormat={targetFormat} />
+      )}
+
+      {(type === 'image' || type === 'video') && <AdjustSection options={options} patch={patch} />}
 
       {type === 'image' && (
         <>
@@ -165,7 +177,7 @@ export function EditorControls({
         </>
       )}
 
-      {type !== 'audio' && (
+      {isVisual && (
         <EditorSection title="Canvas Resolution" icon={<Monitor className="w-4 h-4" />}>
           <div className="space-y-5">
             <select
@@ -385,6 +397,10 @@ export function EditorControls({
         </>
       )}
 
+      {(type === 'audio' || type === 'video') && (
+        <AudioFxSection options={options} patch={patch} isVideo={type === 'video'} />
+      )}
+
       {type === 'audio' && (
         <EditorSection title="Acoustic Fidelity" icon={<Volume2 className="w-4 h-4" />}>
            <div className="space-y-4">
@@ -415,22 +431,6 @@ export function EditorControls({
              Save <Check className="w-4 h-4" />
           </button>
        </div>
-    </div>
-  );
-}
-
-function EditorSection({ title, icon, children }: { title: string, icon: React.ReactNode, children: React.ReactNode }) {
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3 text-[#e11d48]">
-        <div className="p-2 bg-[#e11d48]/10 rounded-lg">
-          {icon}
-        </div>
-        <h4 className="text-[12px] font-black uppercase tracking-[0.2em]">{title}</h4>
-      </div>
-      <div className="pl-1">
-        {children}
-      </div>
     </div>
   );
 }

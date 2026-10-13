@@ -1,5 +1,6 @@
 import { getExtension, stripExtension } from "@/lib/utils";
 import { getFileCategory, MODEL_TARGETS, type EditOptions } from "@/lib/formats";
+import { modelPlanFor, resolveCompression } from "@/lib/compression";
 import { CANVAS_MIME } from "./native";
 import { fastLaneSupports } from "./fast-media";
 
@@ -64,6 +65,14 @@ async function resolveTargetSize(file: File, options: EditOptions): Promise<Edit
   return { ...options, videoBitrate };
 }
 
+/** The fade-out is placed from the end, so FFmpeg needs the output length up front. */
+async function resolveClipDuration(file: File, options: EditOptions): Promise<EditOptions> {
+  if (!options.fadeOut) return options;
+  const end = options.trimEnd ?? (await readDuration(file));
+  const length = (end - (options.trimStart ?? 0)) / (options.speed || 1);
+  return length > 0 ? { ...options, clipDuration: length } : options;
+}
+
 function outputName(sourceName: string, extension: string) {
   const base = stripExtension(sourceName);
   const sourceExt = getExtension(sourceName);
@@ -76,7 +85,10 @@ export async function convertFile(request: ConvertRequest): Promise<ConvertResul
   const target = request.target.toLowerCase();
   const ext = getExtension(file.name);
   const category = getFileCategory(file.name);
-  const options = await resolveTargetSize(file, request.options || {});
+  const options = await resolveClipDuration(
+    file,
+    resolveCompression(await resolveTargetSize(file, request.options || {}), target)
+  );
   const report = (engine: Engine) => onEngine?.(engine);
   const finish = (blob: Blob, engine: Engine, extension = target): ConvertResult => {
     onProgress?.(100);
@@ -88,7 +100,8 @@ export async function convertFile(request: ConvertRequest): Promise<ConvertResul
     report("three");
     onProgress?.(20);
     const { convert3DModelHeadless } = await import("@/lib/3d-converter");
-    return finish(await convert3DModelHeadless(file, target, nintendoWorker), "three");
+    const exportOptions = options.compression && target === "glb" ? modelPlanFor(options.compression) : {};
+    return finish(await convert3DModelHeadless(file, target, nintendoWorker, exportOptions), "three");
   }
 
   // 2. Archive repacking.
@@ -96,18 +109,48 @@ export async function convertFile(request: ConvertRequest): Promise<ConvertResul
     report("archive");
     onProgress?.(30);
     const { convertArchive } = await import("./archives");
-    const { blob, extension } = await convertArchive(file, target);
+    const { blob, extension } = await convertArchive(file, target, options.archiveLevel);
     return finish(blob, "archive", extension);
   }
 
-  // 3. PDF in, images or text out.
+  // 3. PDF in: edited PDF, images, text or a Word document out.
   if (ext === "pdf") {
     report("document");
     onProgress?.(20);
+    const { editPdf, hasPdfEdits } = await import("./pdf-edit");
+    if (target === "pdf") {
+      const edited = await editPdf(file, options);
+      return finish(edited, "document", edited.type === "application/zip" ? "zip" : "pdf");
+    }
+
+    // Page edits apply to every other target too; the intermediate file is
+    // never encrypted or split, whatever the PDF output would have been.
+    let source = file;
+    if (hasPdfEdits(options)) {
+      const pdf = { ...options.pdf, protectPassword: undefined, split: false };
+      source = new File([await editPdf(file, { pdf })], file.name, { type: "application/pdf" });
+      onProgress?.(50);
+    }
     const documents = await import("./documents");
-    if (target === "txt") return finish(await documents.pdfToText(file), "document");
-    const blob = await documents.pdfToImages(file, target, options);
+    if (target === "txt") return finish(await documents.pdfToText(source), "document");
+    if (target === "docx") {
+      const { blocksToDocx } = await import("./text-docs");
+      return finish(blocksToDocx(await documents.pdfToBlocks(source)), "document");
+    }
+    const blob = await documents.pdfToImages(source, target, options);
     return finish(blob, "document", blob.type === "application/zip" ? "zip" : target);
+  }
+
+  // 3b. Text documents (TXT, Markdown, RTF, DOCX) into each other or PDF.
+  if (category === "Document") {
+    report("document");
+    onProgress?.(30);
+    const docs = await import("./text-docs");
+    const blocks = await docs.readDocument(file);
+    if (target === "pdf") return finish(await docs.blocksToPdf(blocks), "document");
+    if (target === "docx") return finish(docs.blocksToDocx(blocks), "document");
+    if (target === "txt" || target === "md") return finish(docs.blocksToText(blocks, target === "md"), "document");
+    throw new Error(`${ext.toUpperCase()} cannot be written as ${target.toUpperCase()}.`);
   }
 
   // 4. Images.
@@ -162,7 +205,10 @@ export async function convertFile(request: ConvertRequest): Promise<ConvertResul
       }
     }
 
-    if (target === "wav" && category === "Audio" && !options.transparencyColor && !options.speed) {
+    // The WebAudio writer only trims; anything else needs a real filter graph.
+    const plainAudio = !options.speed && !options.fadeIn && !options.fadeOut && !options.normalize &&
+      !options.mono && !options.compression && (options.volume ?? 100) === 100;
+    if (target === "wav" && category === "Audio" && plainAudio) {
       try {
         report("native");
         const { audioToWav } = await import("./native");

@@ -1,6 +1,7 @@
 import { zipSync } from "fflate";
 import type { EditOptions } from "@/lib/formats";
 import { CANVAS_MIME } from "./native";
+import type { DocBlock } from "./text-docs";
 
 /**
  * Document conversions, all client-side.
@@ -15,11 +16,45 @@ async function loadPdfjs() {
   return pdfjs;
 }
 
-async function openPdf(file: File) {
+export async function openPdf(file: Blob, password?: string) {
   const pdfjs = await loadPdfjs();
   const data = new Uint8Array(await file.arrayBuffer());
-  const task = pdfjs.getDocument({ data });
-  return { doc: await task.promise, task };
+  const task = pdfjs.getDocument({ data, password });
+  try {
+    return { doc: await task.promise, task };
+  } catch (err) {
+    if ((err as Error)?.name === "PasswordException") {
+      throw new Error(
+        password ? "That password does not open this PDF." : "This PDF is password-protected. Enter its password in the editor.",
+        { cause: err }
+      );
+    }
+    throw err;
+  }
+}
+
+/** Reads the text layer line by line, one page break between pages. */
+export async function pdfToBlocks(file: File): Promise<DocBlock[]> {
+  const { doc, task } = await openPdf(file);
+  const blocks: DocBlock[] = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent();
+    let line = "";
+    for (const item of content.items) {
+      if (!("str" in item)) continue;
+      line += item.str;
+      if (item.hasEOL) {
+        blocks.push({ style: "p", text: line.trim() });
+        line = "";
+      }
+    }
+    if (line.trim()) blocks.push({ style: "p", text: line.trim() });
+    if (i < doc.numPages) blocks.push({ style: "break", text: "" });
+    page.cleanup();
+  }
+  await task.destroy();
+  return blocks;
 }
 
 /** Extracts the full text layer of a PDF. */

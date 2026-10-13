@@ -5,12 +5,13 @@ import { AnimatePresence } from "framer-motion";
 import { Upload, ChevronDown } from "lucide-react";
 import { useWorkers, getWorker } from "@/hooks/use-workers";
 import { useStore } from "@/lib/store";
-import { cn, downloadBlob, is3DFile, stripExtension } from "@/lib/utils";
+import { cn, downloadBlob, getExtension, is3DFile, stripExtension } from "@/lib/utils";
 import { getFileCategory, canConvert, type EditOptions } from "@/lib/formats";
 import { convertFile, type Engine } from "@/lib/conversion";
 import { FileQueue, type SelectedFile } from "@/components/converter/file-queue";
 import { ForgePanel } from "@/components/converter/forge-panel";
 import { MediaEditorModal, type EditorType } from "@/components/converter/media-editors";
+import { PdfEditorModal } from "@/components/converter/pdf-editor";
 import { loadQueue, saveQueue, type StoredJob } from "@/lib/storage";
 
 const TRANSCODE_TIMEOUT_MS = 600_000;
@@ -75,6 +76,9 @@ export default function Home() {
     if (category === "Image") return "image";
     if (category === "Video") return "video";
     if (category === "Audio") return "audio";
+    if (getExtension(sf.file.name) === "pdf") return "pdf";
+    if (category === "3D Model" || (category === "Archive" && targetCategory === "3D Model")) return "model";
+    if (category === "Archive" && canConvert(sf.file.name)) return "archive";
     return null;
   };
 
@@ -268,7 +272,21 @@ export default function Home() {
       </section>
 
       {/* Media Editor Modal */}
-      {editingFile && (
+      {editingFile && getEditorType(editingFile) === "pdf" && (
+        <PdfEditorModal
+          file={editingFile.file}
+          targetFormat={editingFile.targetFormat}
+          initialOptions={editingFile.editOptions}
+          onClose={() => setEditingFileId(null)}
+          onSave={(options: EditOptions, target?: string) =>
+            patchFile(editingFile.id, {
+              editOptions: options, status: 'idle', result: undefined, error: undefined,
+              ...(target ? { targetFormat: target } : {}),
+            })
+          }
+        />
+      )}
+      {editingFile && getEditorType(editingFile) !== "pdf" && (
         <MediaEditorModal
           isOpen
           onClose={() => setEditingFileId(null)}

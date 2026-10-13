@@ -2,13 +2,20 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, Crop as CropIcon, Scissors, Volume2, Check, Play, Pause } from "lucide-react";
+import { X, Crop as CropIcon, Scissors, Volume2, Check, Play, Pause, Box, FileArchive } from "lucide-react";
 import { EditorControls } from "./editor-controls";
 import { cn } from "@/lib/utils";
 import type { EditOptions, Preset } from "@/lib/formats";
+import { cssFilterFor, quarterTurns } from "@/lib/conversion/native";
 import Cropper, { Area } from "react-easy-crop";
 
-export type EditorType = 'image' | 'video' | 'audio' | 'video-to-image';
+export type EditorType = 'image' | 'video' | 'audio' | 'video-to-image' | 'archive' | 'model' | 'pdf';
+
+const TITLES: Partial<Record<EditorType, string>> = {
+  'video-to-image': 'Frame Selection',
+  archive: 'Archive Settings',
+  model: 'Model Export Settings',
+};
 
 interface MediaEditorModalProps {
   isOpen: boolean;
@@ -75,6 +82,12 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
     }));
   }, []);
 
+  // Live preview of the adjustments, composed the same way the engines apply them.
+  const previewStyle = {
+    filter: cssFilterFor(options),
+    transform: `scale(${options.flipH ? -1 : 1}, ${options.flipV ? -1 : 1}) rotate(${quarterTurns(options) * 90}deg)`,
+  };
+
   const handleSave = () => {
     onSave(options, target !== targetFormat ? target : undefined);
     onClose();
@@ -111,10 +124,12 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                   {type === 'image' && <CropIcon className="w-5 h-5 text-[#e11d48]" />}
                   {(type === 'video' || type === 'video-to-image') && <Scissors className="w-5 h-5 text-[#e11d48]" />}
                   {type === 'audio' && <Volume2 className="w-5 h-5 text-[#e11d48]" />}
+                  {type === 'archive' && <FileArchive className="w-5 h-5 text-[#e11d48]" />}
+                  {type === 'model' && <Box className="w-5 h-5 text-[#e11d48]" />}
                 </div>
                 <div>
                   <h3 className="text-xl font-black uppercase tracking-tight italic">
-                    {type === 'video-to-image' ? 'Frame Selection' : `${type.charAt(0).toUpperCase() + type.slice(1)} Editor`}
+                    {TITLES[type] ?? `${type.charAt(0).toUpperCase() + type.slice(1)} Editor`}
                   </h3>
                   <p className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">{file.name}</p>
                 </div>
@@ -147,7 +162,7 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                         />
                       </div>
                     ) : (
-                      <div className="relative group">
+                      <div className="relative group transition-transform" style={previewStyle}>
                          <img 
                             src={previewUrl} 
                             className="max-w-full max-h-[500px] rounded-2xl shadow-2xl object-contain border border-white/5" 
@@ -177,6 +192,7 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                         ref={videoRef}
                         src={previewUrl} 
                         className="max-w-full max-h-full rounded-lg shadow-2xl"
+                        style={type === 'video' ? previewStyle : undefined}
                         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
                         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
                       />
@@ -268,6 +284,17 @@ export function MediaEditorModal({ isOpen, onClose, file, type, targetFormat = "
                          </span>
                        </div>
                     </div>
+                  </div>
+                )}
+                {(type === 'archive' || type === 'model') && (
+                  <div className="flex flex-col items-center gap-4 text-center">
+                    <div className="w-32 h-32 bg-[#e11d48]/10 rounded-[2rem] border border-[#e11d48]/20 flex items-center justify-center">
+                      {type === 'archive' ? <FileArchive className="w-12 h-12 text-[#e11d48]" /> : <Box className="w-12 h-12 text-[#e11d48]" />}
+                    </div>
+                    <p className="text-sm font-bold break-all max-w-md">{file.name}</p>
+                    <p className="text-[10px] font-black uppercase tracking-widest text-neutral-500">
+                      {(file.size / 1024).toFixed(0)} KB{target ? ` -> ${target}` : ""}
+                    </p>
                   </div>
                 )}
               </div>

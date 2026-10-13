@@ -103,18 +103,23 @@ function looksLikeTar(data: Uint8Array) {
 }
 
 /** Repacks an archive into another container format. */
-export async function convertArchive(file: File, target: string): Promise<{ blob: Blob; extension: string }> {
+export async function convertArchive(
+  file: File,
+  target: string,
+  packLevel?: number
+): Promise<{ blob: Blob; extension: string }> {
   const entries = await readArchive(file);
   if (Object.keys(entries).length === 0) throw new Error("The archive is empty or unreadable.");
+  const level = Math.max(0, Math.min(9, Math.round(packLevel ?? 6))) as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 
   switch (target.toLowerCase()) {
     case "zip":
-      return { blob: new Blob([zipSync(entries) as BlobPart], { type: "application/zip" }), extension: "zip" };
+      return { blob: new Blob([zipSync(entries, { level }) as BlobPart], { type: "application/zip" }), extension: "zip" };
     case "tar":
       return { blob: new Blob([tar(entries) as BlobPart], { type: "application/x-tar" }), extension: "tar" };
     case "gz":
       return {
-        blob: new Blob([gzipSync(tar(entries)) as BlobPart], { type: "application/gzip" }),
+        blob: new Blob([gzipSync(tar(entries), { level }) as BlobPart], { type: "application/gzip" }),
         extension: "tar.gz",
       };
     default:

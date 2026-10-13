@@ -53,7 +53,12 @@ interface FileQueueProps {
 function statusText(sf: SelectedFile) {
   if (sf.status === 'processing') return `Processing ${sf.progress}%`;
   if (sf.status === 'error') return sf.error || "Error";
-  if (sf.status === 'completed' && sf.result) return `${(sf.result.blob.size / 1024).toFixed(0)} KB ready`;
+  if (sf.status === 'completed' && sf.result) {
+    const change = Math.round((1 - sf.result.blob.size / Math.max(1, sf.file.size)) * 100);
+    // Only worth a mention when the user asked for a smaller file and got one.
+    const saved = sf.editOptions?.compression && change > 0 ? ` (-${change}%)` : "";
+    return `${(sf.result.blob.size / 1024).toFixed(0)} KB ready${saved}`;
+  }
   return `${(sf.file.size / 1024).toFixed(0)} KB`;
 }
 
@@ -144,7 +149,7 @@ export function FileQueue({
                       {editorTypeFor(sf) && (
                         <button
                           onClick={() => onEdit(sf.id)}
-                          title={sf.editOptions ? "Modify edits" : "Edit media"}
+                          title={sf.editOptions ? "Modify edits" : "Edit"}
                           className={cn(
                             "p-2.5 rounded-lg border transition-all flex items-center justify-center hover:scale-105 active:scale-95",
                             sf.editOptions

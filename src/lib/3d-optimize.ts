@@ -11,6 +11,8 @@ export interface OptimizeOptions {
   maxTextureSize?: number;
   /** Apply EXT_meshopt_compression to geometry. */
   compress?: boolean;
+  /** Run the duplicate-merging pass even when nothing else is requested. */
+  dedup?: boolean;
 }
 
 const MIME_BY_EXT: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", webp: "image/webp" };
@@ -54,8 +56,8 @@ async function resizeTextures(doc: any, maxSize: number) {
 
 /** Rewrites a GLB with the requested optimisations applied. */
 export async function optimizeGlb(glb: ArrayBuffer, options: OptimizeOptions = {}): Promise<ArrayBuffer> {
-  const { maxTextureSize, compress } = options;
-  if (!maxTextureSize && !compress) return glb;
+  const { maxTextureSize, compress, dedup } = options;
+  if (!maxTextureSize && !compress && !dedup) return glb;
 
   try {
     const [{ WebIO }, extensions, functions] = await Promise.all([

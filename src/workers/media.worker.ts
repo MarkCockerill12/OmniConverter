@@ -2,6 +2,8 @@
 
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { toBlobURL } from '@ffmpeg/util';
+import type { CompressionLevel } from '@/lib/formats';
+import { pcmShapeFor, videoCrfFor } from '@/lib/compression';
 
 /**
  * Media Worker
@@ -97,10 +99,40 @@ interface TranscodeOptions {
   fps?: number;
   speed?: number;
   frameTimestamp?: number;
+  compression?: CompressionLevel;
+  rotate?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  blur?: number;
+  grayscale?: boolean;
+  volume?: number;
+  fadeIn?: number;
+  fadeOut?: number;
+  normalize?: boolean;
+  mono?: boolean;
+  mute?: boolean;
+  /** Length of the output in seconds; places the fade-out. */
+  clipDuration?: number;
 }
 
 const STILL_IMAGE = /^(png|jpg|jpeg|webp|bmp|tiff)$/;
 const AUDIO_ONLY = /^(mp3|wav|flac|ogg|m4a)$/;
+/** MPEG-4 Part 2 has no CRF; its quantiser scale stands in for one. */
+const AVI_QSCALE: Record<CompressionLevel, number> = { lossless: 1, balanced: 5, small: 9, smallest: 14 };
+
+/** Rate control for a video target when a compression level is set. */
+function videoCompressionArgs(target: string, level: CompressionLevel) {
+  if (target === 'avi') return ['-q:v', String(AVI_QSCALE[level])];
+  if (target === 'webm') {
+    return level === 'lossless'
+      ? ['-c:v', 'libvpx-vp9', '-lossless', '1']
+      : ['-crf', String(videoCrfFor(level)), '-b:v', '0'];
+  }
+  return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', String(videoCrfFor(level))];
+}
 
 /** Video filter chain shared by the single-pass and GIF palette runs. */
 function videoFilters(options: TranscodeOptions, target: string) {
@@ -113,6 +145,20 @@ function videoFilters(options: TranscodeOptions, target: string) {
     const { width: w, height: h, x, y } = options.crop;
     filters.push(`crop=${w}:${h}:${x}:${y}`);
   }
+  const turns = ((Math.round((options.rotate ?? 0) / 90) % 4) + 4) % 4;
+  if (turns === 1) filters.push('transpose=1');
+  if (turns === 2) filters.push('hflip', 'vflip');
+  if (turns === 3) filters.push('transpose=2');
+  if (options.flipH) filters.push('hflip');
+  if (options.flipV) filters.push('vflip');
+  const eq: string[] = [];
+  // eq's brightness is an offset (-1..1) where the editor's is a percentage.
+  if (options.brightness !== undefined && options.brightness !== 100) eq.push(`brightness=${((options.brightness - 100) / 200).toFixed(3)}`);
+  if (options.contrast !== undefined && options.contrast !== 100) eq.push(`contrast=${(options.contrast / 100).toFixed(3)}`);
+  if (options.saturation !== undefined && options.saturation !== 100) eq.push(`saturation=${(options.saturation / 100).toFixed(3)}`);
+  if (eq.length > 0) filters.push(`eq=${eq.join(':')}`);
+  if (options.grayscale) filters.push('hue=s=0');
+  if (options.blur) filters.push(`gblur=sigma=${options.blur}`);
   if (options.speed && options.speed !== 1) filters.push(`setpts=${(1 / options.speed).toFixed(4)}*PTS`);
   if (options.fps && target !== 'gif') filters.push(`fps=${options.fps}`);
   if (options.resolution) {
@@ -127,12 +173,19 @@ function videoFilters(options: TranscodeOptions, target: string) {
 /** atempo only accepts 0.5-2.0, so larger changes are chained. */
 function audioFilters(options: TranscodeOptions) {
   const filters: string[] = [];
+  if (options.volume !== undefined && options.volume !== 100) filters.push(`volume=${(options.volume / 100).toFixed(3)}`);
   let speed = options.speed && options.speed !== 1 ? options.speed : 0;
   while (speed) {
     const step = Math.max(0.5, Math.min(2, speed));
     filters.push(`atempo=${step.toFixed(4)}`);
     speed = Math.abs(speed / step - 1) < 0.001 ? 0 : speed / step;
   }
+  if (options.fadeIn) filters.push(`afade=t=in:st=0:d=${options.fadeIn}`);
+  if (options.fadeOut && options.clipDuration) {
+    const start = Math.max(0, options.clipDuration - options.fadeOut);
+    filters.push(`afade=t=out:st=${start.toFixed(3)}:d=${options.fadeOut}`);
+  }
+  if (options.normalize) filters.push('loudnorm=I=-16:TP=-1.5:LRA=11');
   return filters;
 }
 
@@ -157,11 +210,21 @@ function buildArgs(inputName: string, outputName: string, targetFormat: string, 
   const vf = videoFilters(options, target);
   if (vf.length > 0) args.push('-vf', vf.join(','));
   const af = audioFilters(options);
-  if (af.length > 0 && !STILL_IMAGE.test(target)) args.push('-af', af.join(','));
+  const silent = !!options.mute && !AUDIO_ONLY.test(target);
+  if (af.length > 0 && !STILL_IMAGE.test(target) && !silent) args.push('-af', af.join(','));
+  if (silent) args.push('-an');
+  if (options.mono) args.push('-ac', '1');
 
   if (options.audioBitrate) args.push('-b:a', options.audioBitrate);
   if (options.videoBitrate && !STILL_IMAGE.test(target)) {
     args.push('-b:v', String(options.videoBitrate), '-maxrate', String(options.videoBitrate), '-bufsize', String(options.videoBitrate * 2));
+  } else if (options.compression && !STILL_IMAGE.test(target) && !AUDIO_ONLY.test(target)) {
+    args.push(...videoCompressionArgs(target, options.compression));
+  }
+  if (options.compression) {
+    const { sampleRate } = pcmShapeFor(target, options.compression);
+    if (sampleRate) args.push('-ar', String(sampleRate));
+    if (target === 'flac') args.push('-compression_level', '8');
   }
   // JPEG/TIFF quality: FFmpeg's scale is inverted (1 best, 31 worst).
   if (options.quality && /^(jpg|jpeg|tiff)$/.test(target)) {
