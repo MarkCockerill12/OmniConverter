@@ -2,13 +2,12 @@ import type { PDFDocument, PDFFont, PDFPage } from "@cantoo/pdf-lib";
 import { unzlibSync, zipSync } from "fflate";
 import type { EditOptions, PdfAnnotation, PdfEdits, PdfPageRef } from "@/lib/formats";
 import { pdfImagePlanFor } from "@/lib/compression";
+import { pageSpace } from "./pdf-content";
 
 /**
  * PDF editing: page assembly, drawn annotations, form filling, stamps,
- * metadata, encryption and image recompression.
- *
- * Existing page content is never rewritten: text already on a page cannot be
- * retyped in place, only covered and written over.
+ * metadata, encryption and image recompression. Redaction and in-place text
+ * edits rewrite the page content itself (see pdf-redact.ts).
  */
 
 type Lib = typeof import("@cantoo/pdf-lib");
@@ -79,30 +78,6 @@ async function openSource(lib: Lib, file: Blob, password?: string): Promise<PDFD
   return doc;
 }
 
-/**
- * Maps display coordinates (points from the top-left of the page as a viewer
- * shows it) into the page's own user space, whatever its /Rotate entry says.
- */
-function pageSpace(page: PDFPage) {
-  const box = page.getCropBox();
-  const rotation = ((page.getRotation().angle % 360) + 360) % 360;
-  const sideways = rotation % 180 !== 0;
-  const toUser = (u: number, v: number) => {
-    switch (rotation) {
-      case 90: return { x: box.x + v, y: box.y + u };
-      case 180: return { x: box.x + box.width - u, y: box.y + v };
-      case 270: return { x: box.x + box.width - v, y: box.y + box.height - u };
-      default: return { x: box.x + u, y: box.y + box.height - v };
-    }
-  };
-  return {
-    rotation,
-    toUser,
-    width: sideways ? box.height : box.width,
-    height: sideways ? box.width : box.height,
-  };
-}
-
 async function drawAnnotation(lib: Lib, doc: PDFDocument, page: PDFPage, font: PDFFont, ann: PdfAnnotation) {
   const space = pageSpace(page);
   const color = parseColor(lib, ann.color);
@@ -119,7 +94,7 @@ async function drawAnnotation(lib: Lib, doc: PDFDocument, page: PDFPage, font: P
     return;
   }
 
-  if (ann.type === "highlight" || ann.type === "rect") {
+  if (ann.type === "highlight" || ann.type === "rect" || ann.type === "redact") {
     const a = space.toUser(ann.x, ann.y);
     const b = space.toUser(ann.x + ann.width, ann.y + ann.height);
     page.drawRectangle({
@@ -128,7 +103,7 @@ async function drawAnnotation(lib: Lib, doc: PDFDocument, page: PDFPage, font: P
       width: Math.abs(b.x - a.x),
       height: Math.abs(b.y - a.y),
       color,
-      opacity: ann.opacity ?? (ann.type === "highlight" ? 0.4 : 1),
+      opacity: ann.type === "redact" ? 1 : ann.opacity ?? (ann.type === "highlight" ? 0.4 : 1),
       // Multiply keeps the text under a highlight fully legible.
       ...(ann.type === "highlight" ? { blendMode: lib.BlendMode.Multiply } : {}),
     });
@@ -347,11 +322,15 @@ export async function editPdf(file: Blob, options: EditOptions = {}): Promise<Bl
   const edits = options.pdf ?? {};
   const { doc, keys, refs, inPlace } = await assemble(lib, file, edits);
 
+  // Before form filling: a redaction deletes the fields it touches.
+  const { applyContentEdits, sweepUnreachable } = await import("./pdf-redact");
+  const rewrote = await applyContentEdits(lib, doc, keys, edits.annotations ?? []);
   if (inPlace) fillForm(lib, doc, edits);
 
   const font = await doc.embedFont(lib.StandardFonts.Helvetica);
   const pages = doc.getPages();
   for (const ann of edits.annotations ?? []) {
+    if (ann.type === "edit") continue;
     const index = keys.indexOf(ann.page);
     if (index !== -1) await drawAnnotation(lib, doc, pages[index], font, ann);
   }
@@ -360,6 +339,13 @@ export async function editPdf(file: Blob, options: EditOptions = {}): Promise<Bl
   });
   drawStamps(lib, doc, font, edits);
   applyMetadata(lib, doc, edits);
+
+  // The replaced content streams and images are still in the file until
+  // nothing points at them: drop them so redacted data cannot be recovered.
+  if (rewrote) {
+    await doc.flush();
+    sweepUnreachable(lib, doc);
+  }
 
   const plan = options.compression ? pdfImagePlanFor(options.compression) : null;
   if (plan) await recompressImages(lib, doc, plan);

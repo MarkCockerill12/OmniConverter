@@ -6,6 +6,7 @@ import { CircleDashed, FileText, Lock, X } from "lucide-react";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { EditOptions, PdfAnnotation, PdfEdits, PdfPageRef } from "@/lib/formats";
 import type { PdfFieldInfo } from "@/lib/conversion/pdf-edit";
+import type { PdfDocText, PdfTextRun } from "@/lib/conversion/pdf-text";
 import { FIELD_CLASS } from "./editor-parts";
 import { PdfEditorRail } from "./pdf-editor-rail";
 import { PageStage, PageThumb, type NewAnnotation, type PdfTool } from "./pdf-stage";
@@ -37,6 +38,8 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
   const [tool, setTool] = useState<PdfTool>("select");
   const [color, setColor] = useState("#e11d48");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The text each source document contains, read from its content streams.
+  const [texts, setTexts] = useState<(PdfDocText | null)[]>([]);
 
   const { attachments, openPassword } = pdf;
 
@@ -93,6 +96,20 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
     return () => { cancelled = true; };
   }, [file, openPassword]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setTexts([]);
+    (async () => {
+      const { readPdfText } = await import("@/lib/conversion/pdf-text");
+      const read: (PdfDocText | null)[] = [];
+      for (const [i, source] of [file, ...(attachments ?? [])].entries()) {
+        read.push(await readPdfText(source, i === 0 ? openPassword : undefined).catch(() => null));
+      }
+      if (!cancelled) setTexts(read);
+    })();
+    return () => { cancelled = true; };
+  }, [file, attachments, openPassword]);
+
   const pages = useMemo<PdfPageRef[]>(
     () => pdf.pages ?? Array.from({ length: docs[0]?.numPages ?? 0 }, (_, index) => ({ key: `0:${index}`, source: 0, index, rotate: 0 })),
     [pdf.pages, docs]
@@ -107,6 +124,54 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
       ...prev,
       pdf: { ...prev.pdf, annotations: (prev.pdf?.annotations ?? []).map(fn).filter((ann): ann is PdfAnnotation => !!ann) },
     }));
+
+  const activeText = active ? texts[active.source] : undefined;
+  const activeRuns = activeText?.pages[active!.index]?.runs;
+
+  /** Starts replacing one line of the page's own text. */
+  const editRun = (run: PdfTextRun) => {
+    if (!active) return;
+    const id = crypto.randomUUID();
+    const source = { x: run.x, y: run.y, size: run.size, text: run.text, color: run.color, font: run.font };
+    patchPdf({
+      annotations: [...annotations, {
+        id, page: active.key, type: "edit", x: run.x, y: run.y, width: run.width, height: run.height,
+        glyphs: run.glyphs, text: run.text, size: run.size, color: run.color, font: "match", source,
+      }],
+    });
+    setSelectedId(id);
+  };
+
+  /** Marks every match on every page for redaction; returns how many were found. */
+  const redactMatches = async (pattern: RegExp) => {
+    const { findInPage } = await import("@/lib/conversion/pdf-text");
+    const added: PdfAnnotation[] = [];
+    const taken = new Set(annotations.filter((a) => a.type === "redact").map((a) => `${a.page}|${JSON.stringify(a.glyphs)}`));
+    for (const page of pages) {
+      const text = texts[page.source]?.pages[page.index];
+      if (!text) continue;
+      for (const hit of findInPage(text, pattern)) {
+        const key = `${page.key}|${JSON.stringify(hit.glyphs)}`;
+        if (taken.has(key)) continue;
+        taken.add(key);
+        added.push({ id: crypto.randomUUID(), page: page.key, type: "redact", ...hit.box, glyphs: hit.glyphs, color: "#000000" });
+      }
+    }
+    if (added.length) setOptions((prev) => ({ ...prev, pdf: { ...prev.pdf, annotations: [...(prev.pdf?.annotations ?? []), ...added] } }));
+    return added.length;
+  };
+
+  const clearRedactions = () => {
+    mapAnnotations((ann) => (ann.type === "redact" ? null : ann));
+    setSelectedId(null);
+  };
+
+  // Characters of a replaced line its own font has no glyph for.
+  const missingGlyphs = (() => {
+    if (selected?.type !== "edit" || (selected.font ?? "match") !== "match" || !selected.source) return "";
+    const covers = activeText?.fonts[selected.source.font]?.covers ?? "";
+    return [...new Set(selected.text ?? "")].filter((ch) => ch !== " " && !covers.includes(ch)).join(" ");
+  })();
 
   const addAnnotation = (draft: NewAnnotation) => {
     if (!active) return;
@@ -269,6 +334,10 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
                 onSelect={setSelectedId}
                 onAdd={addAnnotation}
                 onMove={moveAnnotation}
+                onUpdate={(id, next) => mapAnnotations((ann) => (ann.id === id ? { ...ann, ...next } : ann))}
+                runs={activeRuns}
+                fonts={activeText?.fonts}
+                onEditRun={editRun}
               />
               </div>
             )}
@@ -286,6 +355,12 @@ export function PdfEditorModal({ file, targetFormat = "", initialOptions, onClos
             selected={selected}
             updateSelected={(next) => mapAnnotations((ann) => (ann.id === selectedId ? { ...ann, ...next } : ann))}
             deleteSelected={deleteSelected}
+            missingGlyphs={missingGlyphs}
+            textReady={texts.length > 0}
+            textFound={!!activeRuns?.length}
+            redactionCount={annotations.filter((ann) => ann.type === "redact").length}
+            onRedactMatches={redactMatches}
+            onClearRedactions={clearRedactions}
             pageNumber={activeIndex + 1}
             pageCount={pages.length}
             onRotatePage={rotatePage}

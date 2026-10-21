@@ -1,19 +1,22 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import {
-  ArrowDown, ArrowUp, Check, FilePlus2, Highlighter, ImagePlus, Info, Layers, ListChecks, Lock, MousePointer2,
-  PenLine, RotateCcw, RotateCw, Square, Stamp, Trash2, Type,
+  ArrowDown, ArrowUp, Check, EyeOff, FilePlus2, Highlighter, ImagePlus, Info, Layers, ListChecks, Lock, MousePointer2,
+  PenLine, RotateCcw, RotateCw, ScanSearch, Square, Stamp, TextCursorInput, Trash2, Type, Undo2,
 } from "lucide-react";
 import type { EditOptions, PdfAnnotation, PdfEdits } from "@/lib/formats";
 import type { PdfFieldInfo } from "@/lib/conversion/pdf-edit";
 import { CompressionSection } from "./editor-adjustments";
-import { EditorSection, FIELD_CLASS, GhostButton, HINT_CLASS, LABEL_CLASS, Slider, Toggle } from "./editor-parts";
+import { REDACT_PRESETS, textPattern } from "@/lib/conversion/pdf-text";
+import { Choice, EditorSection, FIELD_CLASS, GhostButton, HINT_CLASS, LABEL_CLASS, Slider, Toggle } from "./editor-parts";
 import type { PdfTool } from "./pdf-stage";
 
 const TOOLS: { id: PdfTool; label: string; icon: React.ReactNode }[] = [
   { id: "select", label: "Select", icon: <MousePointer2 className="w-4 h-4" /> },
-  { id: "text", label: "Text", icon: <Type className="w-4 h-4" /> },
+  { id: "edit", label: "Edit text", icon: <TextCursorInput className="w-4 h-4" /> },
+  { id: "text", label: "Add text", icon: <Type className="w-4 h-4" /> },
+  { id: "redact", label: "Redact", icon: <EyeOff className="w-4 h-4" /> },
   { id: "highlight", label: "Highlight", icon: <Highlighter className="w-4 h-4" /> },
   { id: "rect", label: "Cover", icon: <Square className="w-4 h-4" /> },
   { id: "ink", label: "Draw", icon: <PenLine className="w-4 h-4" /> },
@@ -31,6 +34,13 @@ interface PdfEditorRailProps {
   selected: PdfAnnotation | undefined;
   updateSelected: (next: Partial<PdfAnnotation>) => void;
   deleteSelected: () => void;
+  /** Characters a replaced line's own font cannot show. */
+  missingGlyphs: string;
+  textReady: boolean;
+  textFound: boolean;
+  redactionCount: number;
+  onRedactMatches: (pattern: RegExp) => Promise<number>;
+  onClearRedactions: () => void;
   pageNumber: number;
   pageCount: number;
   onRotatePage: (by: number) => void;
@@ -46,7 +56,7 @@ interface PdfEditorRailProps {
 /** Right-hand rail of the PDF editor: tools, page operations and document settings. */
 export function PdfEditorRail({
   fileName, options, patch, patchPdf, tool, setTool, color, setColor, selected, updateSelected, deleteSelected,
-  pageNumber, pageCount, onRotatePage, onMovePage, onDeletePage, onAddFiles, onAddImage, fields, onClose, onSave,
+  missingGlyphs, textReady, textFound, redactionCount, onRedactMatches, onClearRedactions, pageNumber, pageCount, onRotatePage, onMovePage, onDeletePage, onAddFiles, onAddImage, fields, onClose, onSave,
 }: PdfEditorRailProps) {
   const mergeInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -56,6 +66,12 @@ export function PdfEditorRail({
   const setMeta = (key: keyof NonNullable<PdfEdits["metadata"]>, value: string) => patchPdf({ metadata: { ...meta, [key]: value } });
   const setMark = (next: Partial<NonNullable<PdfEdits["watermark"]>>) =>
     patchPdf({ watermark: { text: "", opacity: 0.2, size: 64, color: "#e11d48", ...mark, ...next } });
+  const [query, setQuery] = useState("");
+  const [found, setFound] = useState("");
+  const markAll = async (pattern: RegExp, label: string) => {
+    const count = await onRedactMatches(pattern);
+    setFound(count ? `Marked ${count} ${count === 1 ? "match" : "matches"} for ${label}.` : `Nothing new found for ${label}.`);
+  };
 
   return (
     <div className="border-l border-white/5 p-6 xl:p-8 space-y-10 w-[320px] xl:w-[400px] shrink-0 bg-[#1a1d23] overflow-y-auto">
@@ -74,9 +90,13 @@ export function PdfEditorRail({
             onChange={(e) => { const f = e.target.files?.[0]; if (f) onAddImage(f); e.target.value = ""; }}
           />
           <div className="flex items-center gap-3">
-            <input type="color" aria-label="Colour" className="w-10 h-10 shrink-0 rounded-lg bg-transparent cursor-pointer" value={color} onChange={(e) => setColor(e.target.value)} />
+            {tool !== "edit" && tool !== "redact" && (
+              <input type="color" aria-label="Colour" className="w-10 h-10 shrink-0 rounded-lg bg-transparent cursor-pointer" value={color} onChange={(e) => setColor(e.target.value)} />
+            )}
             <p className={HINT_CLASS}>
-              {tool === "rect" ? "Cover hides what is under it but does not delete the hidden text from the file."
+              {tool === "rect" ? "Cover only paints over the page; the text under it stays in the file. Use Redact to remove it."
+                : tool === "redact" ? "Drag a box: the text, pictures and drawings under it are deleted from the file when you save."
+                : tool === "edit" ? (!textReady ? "Reading the page's text..." : textFound ? "Click a line of the page's text and type over it." : "No selectable text on this page (a scan has none to edit).")
                 : tool === "text" ? "Click the page to place text, then edit it below."
                 : tool === "select" ? "Click an item to select it; drag to move, Delete to remove."
                 : "Drag on the page."}
@@ -95,6 +115,33 @@ export function PdfEditorRail({
                   <Slider label="Size" min={6} max={96} suffix="pt" value={selected.size ?? 14} onChange={(size) => updateSelected({ size })} />
                 </>
               )}
+              {selected.type === "edit" && (
+                <>
+                  <textarea
+                    aria-label="Replacement text" rows={2} className={FIELD_CLASS}
+                    value={selected.text ?? ""}
+                    onChange={(e) => updateSelected({ text: e.target.value.replace(/\n/g, " ") })}
+                  />
+                  <Choice
+                    columns={4} value={selected.font ?? "match"}
+                    options={[{ id: "match", label: "Original", title: "Keep the line's own font" }, { id: "sans", label: "Sans" }, { id: "serif", label: "Serif" }, { id: "mono", label: "Mono" }]}
+                    onChange={(font) => updateSelected({ font })}
+                  />
+                  {(selected.font ?? "match") !== "match" && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <GhostButton active={!!selected.bold} onClick={() => updateSelected({ bold: !selected.bold })}>Bold</GhostButton>
+                      <GhostButton active={!!selected.italic} onClick={() => updateSelected({ italic: !selected.italic })}>Italic</GhostButton>
+                    </div>
+                  )}
+                  {missingGlyphs && (
+                    <p className={HINT_CLASS}>The original font has no {missingGlyphs}; this line will be set in the closest standard font instead.</p>
+                  )}
+                  <Slider label="Size" min={4} max={96} step={0.5} suffix="pt" value={Math.round((selected.size ?? 12) * 2) / 2} onChange={(size) => updateSelected({ size })} />
+                </>
+              )}
+              {selected.type === "redact" && (
+                <p className={HINT_CLASS}>Everything under this box is deleted from the file on save. The box itself is drawn solid.</p>
+              )}
               {selected.type === "image" && (
                 <Slider
                   label="Width" min={20} max={600} suffix="pt" value={Math.round(selected.width)}
@@ -110,14 +157,54 @@ export function PdfEditorRail({
                   <span className={LABEL_CLASS}>Item colour</span>
                 </div>
               )}
-              <Slider
-                label="Opacity" min={5} max={100} step={5} suffix="%"
-                value={Math.round((selected.opacity ?? (selected.type === "highlight" ? 0.4 : 1)) * 100)}
-                onChange={(v) => updateSelected({ opacity: v / 100 })}
-              />
-              <GhostButton onClick={deleteSelected}><Trash2 className="w-4 h-4" /> Delete item</GhostButton>
+              {selected.type !== "redact" && selected.type !== "edit" && (
+                <Slider
+                  label="Opacity" min={5} max={100} step={5} suffix="%"
+                  value={Math.round((selected.opacity ?? (selected.type === "highlight" ? 0.4 : 1)) * 100)}
+                  onChange={(v) => updateSelected({ opacity: v / 100 })}
+                />
+              )}
+              {selected.type === "edit" ? (
+                <GhostButton onClick={deleteSelected}><Undo2 className="w-4 h-4" /> Restore original</GhostButton>
+              ) : (
+                <GhostButton onClick={deleteSelected}><Trash2 className="w-4 h-4" /> {selected.type === "redact" ? "Remove redaction" : "Delete item"}</GhostButton>
+              )}
             </div>
           )}
+        </div>
+      </EditorSection>
+
+      <EditorSection title="Redact" icon={<EyeOff className="w-4 h-4" />}>
+        <div className="space-y-3">
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => { e.preventDefault(); if (query.trim()) markAll(textPattern(query.trim()), `"${query.trim()}"`); }}
+          >
+            <input
+              aria-label="Find text to redact" placeholder="Find text to redact" className={FIELD_CLASS}
+              value={query} onChange={(e) => setQuery(e.target.value)}
+            />
+            <button
+              type="submit" title="Redact every match" disabled={!textReady || !query.trim()}
+              className="shrink-0 px-4 rounded-2xl bg-[#e11d48] hover:bg-[#be123c] disabled:opacity-30 transition-colors"
+            >
+              <ScanSearch className="w-4 h-4" />
+            </button>
+          </form>
+          <div className="grid grid-cols-3 gap-2">
+            {REDACT_PRESETS.map((preset) => (
+              <GhostButton key={preset.label} disabled={!textReady} title={`Redact all ${preset.name}`} onClick={() => markAll(preset.pattern, preset.name)}>
+                {preset.label}
+              </GhostButton>
+            ))}
+          </div>
+          {found && <p className={HINT_CLASS} data-omni="pdf-redact-found">{found}</p>}
+          {redactionCount > 0 && (
+            <GhostButton onClick={() => { onClearRedactions(); setFound(""); }}><Trash2 className="w-4 h-4" /> Remove all {redactionCount} redactions</GhostButton>
+          )}
+          <p className={HINT_CLASS}>
+            Searches every page, including the hidden text layer of scanned pages. Document properties and bookmarks are not searched; strip metadata below if they mention it.
+          </p>
         </div>
       </EditorSection>
 

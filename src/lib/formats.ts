@@ -48,7 +48,11 @@ export interface PdfPageRef {
 export interface PdfAnnotation {
   id: string;
   page: string;
-  type: "text" | "highlight" | "rect" | "ink" | "image";
+  /**
+   * "redact" removes whatever lies under the box from the file itself;
+   * "edit" replaces a line of the page's own text.
+   */
+  type: "text" | "highlight" | "rect" | "ink" | "image" | "redact" | "edit";
   x: number;
   y: number;
   width: number;
@@ -61,6 +65,14 @@ export interface PdfAnnotation {
   strokes?: { x: number; y: number }[][];
   strokeWidth?: number;
   image?: Blob;
+  /** redact/edit: glyphs of the page's own text, as [show sequence, first, last] spans. */
+  glyphs?: [number, number, number][];
+  /** edit: the line as it was, where it sat and how it looked. */
+  source?: { x: number; y: number; size: number; text: string; color: string; font: string };
+  /** edit: "match" reuses the line's own font when it has every character needed. */
+  font?: "match" | "sans" | "serif" | "mono";
+  bold?: boolean;
+  italic?: boolean;
 }
 
 export interface PdfEdits {
